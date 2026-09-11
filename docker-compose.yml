@@ -12,11 +12,11 @@ services:
         - CMD
         - python
         - -c
-        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"
       interval: 5s
       timeout: 5s
       retries: 12
-      start_period: 5s
+      start_period: 10s
 
   web:
     build: ./web
@@ -25,12 +25,14 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    # 只探测自身 nginx 是否在服务；对 api 的启动顺序依赖由 depends_on 保证，
+    # 端到端联通性由 verify 的「web 代理 /api 到后端」用例验收。
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/api/health"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
       interval: 5s
       timeout: 5s
       retries: 12
-      start_period: 5s
+      start_period: 10s
 
   # 一次性验收服务：docker compose --profile verify up --build --exit-code-from verify
   verify:

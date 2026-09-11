@@ -158,6 +158,16 @@ uvicorn app.main:app --reload          # http://localhost:8000
 cd web && npm ci && npm run dev        # http://localhost:5173（/api 已代理到 8000）
 ```
 
+## 故障排查
+
+- **web 服务一直 unhealthy**：web 的健康检查只探测自身 nginx
+  （`http://127.0.0.1/`），不穿透到 api；对 api 的启动顺序依赖由
+  `depends_on: service_healthy` 保证，端到端联通性由 verify 的
+  「web 代理 /api 到后端」用例验收。nginx 通过 Docker 内嵌 DNS
+  （`resolver 127.0.0.11`）在请求期解析 `api`，api 容器重建、IP 变化后
+  无需重启 web 即可恢复代理。
+- 查看健康检查失败原因：`docker inspect --format '{{json .State.Health}}' <容器>`。
+
 ## 目录结构
 
 ```
