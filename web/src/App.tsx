@@ -2,11 +2,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { compareBatches, fetchBatch, fetchBatches, recomputeBatch } from "./api";
 import { BatchDetailView } from "./components/BatchDetail";
 import { BatchForm } from "./components/BatchForm";
+import { CalibrationView } from "./components/CalibrationView";
 import { HistoryList } from "./components/HistoryList";
 import { ResultBanner } from "./components/ResultBanner";
 import type { BatchDetail, BatchSummary, CompareResult } from "./types";
 
+type View = "batches" | "calibration";
+
 export default function App() {
+  const [view, setView] = useState<View>("batches");
   const [batches, setBatches] = useState<BatchSummary[]>([]);
   const [listError, setListError] = useState<string | null>(null);
   const [lastCreated, setLastCreated] = useState<BatchSummary | null>(null);
@@ -147,49 +151,76 @@ export default function App() {
           只累计高于 600°C 的计热值；低于 18000.0 °C·min 判欠烧，
           18000.0–24000.0（含两端）判合格，高于 24000.0 判过烧。
         </p>
+        <nav className="view-tabs" data-testid="view-tabs">
+          <button
+            type="button"
+            className={view === "batches" ? "tab active" : "tab"}
+            onClick={() => setView("batches")}
+            data-testid="tab-batches"
+          >
+            窑次判定
+          </button>
+          <button
+            type="button"
+            className={view === "calibration" ? "tab active" : "tab"}
+            onClick={() => setView("calibration")}
+            data-testid="tab-calibration"
+          >
+            热电偶校准核验
+          </button>
+        </nav>
       </header>
-      {listError && (
-        <p className="field-error" data-testid="load-error">
-          {listError}
-        </p>
+      {view === "calibration" ? (
+        <CalibrationView />
+      ) : (
+        <>
+          {listError && (
+            <p className="field-error" data-testid="load-error">
+              {listError}
+            </p>
+          )}
+          <main>
+            <div className="column">
+              <BatchForm onCreated={handleCreated} onDirty={handleFormDirty} />
+              {lastCreated && <ResultBanner batch={lastCreated} />}
+            </div>
+            <div className="column">
+              <HistoryList
+                batches={batches}
+                selectedId={selectedId}
+                onSelect={(id) => void handleSelect(id)}
+              />
+              {detailLoading && (
+                <p className="card detail-status" data-testid="detail-loading">
+                  窑次详情加载中…
+                </p>
+              )}
+              {detailError && (
+                <p
+                  className="field-error card detail-status"
+                  data-testid="detail-error"
+                >
+                  {detailError}
+                </p>
+              )}
+              {detail && (
+                <BatchDetailView
+                  detail={detail}
+                  recomputing={recomputing}
+                  recomputeError={recomputeError}
+                  onRecompute={(id) => void handleRecompute(id)}
+                  batches={batches}
+                  referenceId={referenceId}
+                  compare={compare}
+                  compareError={compareError}
+                  compareLoading={compareLoading}
+                  onSelectReference={(id) => void handleSelectReference(id)}
+                />
+              )}
+            </div>
+          </main>
+        </>
       )}
-      <main>
-        <div className="column">
-          <BatchForm onCreated={handleCreated} onDirty={handleFormDirty} />
-          {lastCreated && <ResultBanner batch={lastCreated} />}
-        </div>
-        <div className="column">
-          <HistoryList
-            batches={batches}
-            selectedId={selectedId}
-            onSelect={(id) => void handleSelect(id)}
-          />
-          {detailLoading && (
-            <p className="card detail-status" data-testid="detail-loading">
-              窑次详情加载中…
-            </p>
-          )}
-          {detailError && (
-            <p className="field-error card detail-status" data-testid="detail-error">
-              {detailError}
-            </p>
-          )}
-          {detail && (
-            <BatchDetailView
-              detail={detail}
-              recomputing={recomputing}
-              recomputeError={recomputeError}
-              onRecompute={(id) => void handleRecompute(id)}
-              batches={batches}
-              referenceId={referenceId}
-              compare={compare}
-              compareError={compareError}
-              compareLoading={compareLoading}
-              onSelectReference={(id) => void handleSelectReference(id)}
-            />
-          )}
-        </div>
-      </main>
     </div>
   );
 }

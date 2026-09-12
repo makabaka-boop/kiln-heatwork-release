@@ -96,3 +96,38 @@ export interface ApiErrorDetail {
   message: string;
   errors: ApiFieldError[];
 }
+
+// ---------------------------------------------------------------------------
+// 热电偶校准核验
+// ---------------------------------------------------------------------------
+
+export type CalibrationVerdict = "qualified" | "unqualified";
+
+/** 一组校准点：设定温度、仪表读数、标准器读数与系统算出的示值误差 */
+export interface CalibrationGroup {
+  index: number;
+  set_temperature: number;
+  indicator_reading: number;
+  standard_reading: number;
+  /** 示值误差 = 仪表读数 − 标准器读数（°C） */
+  indication_error: number;
+}
+
+/** 校准核验单（创建响应与详情响应字段一致，创建/详情另带 id、created_at） */
+export interface CalibrationRecord {
+  id?: number;
+  probe_id: string;
+  calibrated_at: string;
+  /** 允许偏差（°C，正数） */
+  tolerance: number;
+  groups: CalibrationGroup[];
+  group_count: number;
+  /** 逐组示值误差（°C） */
+  indication_errors: number[];
+  /** 最大绝对误差（°C） */
+  max_abs_error: number;
+  verdict: CalibrationVerdict;
+  verdict_label: string;
+  created_at?: string;
+}
+

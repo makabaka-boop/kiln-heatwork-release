@@ -36,6 +36,76 @@ header p {
   color: var(--muted);
 }
 
+.view-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.view-tabs .tab {
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  padding: 8px 16px;
+  color: var(--muted);
+}
+
+.view-tabs .tab:hover:not(:disabled) {
+  border-bottom-color: var(--line);
+  color: var(--ink);
+}
+
+.view-tabs .tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.calibration-table {
+  font-size: 13.5px;
+}
+
+.calibration-detail .verdict-line {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 4px 0;
+}
+
+.calibration-ok {
+  border-left: 6px solid var(--ok);
+}
+
+.calibration-bad {
+  border-left: 6px solid var(--bad);
+}
+
+.cal-hint {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0 0 4px;
+}
+
+tr.cal-exceeded td {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.cal-overmark {
+  font-size: 12px;
+}
+
+.cal-immutable-note {
+  margin: 12px 0 0;
+  padding: 10px 14px;
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 main {
   display: grid;
   grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);

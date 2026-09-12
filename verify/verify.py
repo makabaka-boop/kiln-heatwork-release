@@ -808,6 +808,183 @@ def _():
         assert node["heatwork_delta"] == 0, node
 
 
+# ---------- 热电偶校准核验单 ----------
+
+def cal_payload(probe_id="VERIFY-TC-1", calibrated_at="2026-09-12T10:00:00Z",
+                tolerance=2.0, groups=None):
+    if groups is None:
+        # 误差 +1 / +2 / -2：最大绝对误差恰为 2.0 == 允许偏差 -> 边界合格
+        groups = [
+            {"set_temperature": 100, "indicator_reading": 101, "standard_reading": 100},
+            {"set_temperature": 500, "indicator_reading": 502, "standard_reading": 500},
+            {"set_temperature": 1000, "indicator_reading": 998, "standard_reading": 1000},
+        ]
+    return {
+        "probe_id": probe_id,
+        "calibrated_at": calibrated_at,
+        "tolerance": tolerance,
+        "groups": groups,
+    }
+
+
+def independent_calibration(tolerance, groups):
+    """独立复写：逐组示值误差、最大绝对误差与结论（边界恰等算合格）。"""
+    errors = [Fraction(str(g["indicator_reading"])) - Fraction(str(g["standard_reading"]))
+              for g in groups]
+    max_abs = max(abs(value) for value in errors)
+    verdict = "qualified" if max_abs <= Fraction(str(tolerance)) else "unqualified"
+    return errors, max_abs, verdict
+
+
+@check("核验单：边界恰等于允许偏差判合格，持久化后可按编号重新打开")
+def _():
+    payload = cal_payload()
+    exp_errors, exp_max, exp_verdict = independent_calibration(2.0, payload["groups"])
+    assert exp_max == 2 and exp_verdict == "qualified"
+
+    status, body = request("POST", f"{WEB_BASE}/api/calibrations", payload)
+    assert status == 201, (status, body)
+    assert body["verdict"] == "qualified" and body["verdict_label"] == "合格", body
+    assert body["max_abs_error"] == float(exp_max) == 2.0, body
+    assert body["indication_errors"] == [float(e) for e in exp_errors], body
+    # 逐组示值误差与独立复算一致
+    for group, expected in zip(body["groups"], exp_errors):
+        assert group["indication_error"] == float(expected), group
+        assert group["set_temperature"] == payload["groups"][group["index"]]["set_temperature"]
+
+    calibration_id = body["id"]
+
+    # 持久化详情：原始读数逐字保留，结论与判定依据一致
+    status, detail = request("GET", f"{WEB_BASE}/api/calibrations/{calibration_id}")
+    assert status == 200, (status, detail)
+    assert detail["probe_id"] == "VERIFY-TC-1", detail
+    assert detail["calibrated_at"] == "2026-09-12T10:00:00Z", detail
+    assert detail["tolerance"] == 2.0 and detail["max_abs_error"] == 2.0, detail
+    assert detail["verdict"] == "qualified" and detail["verdict_label"] == "合格", detail
+    assert len(detail["groups"]) == 3 and detail["group_count"] == 3, detail
+    assert [
+        (g["set_temperature"], g["indicator_reading"], g["standard_reading"])
+        for g in detail["groups"]
+    ] == [
+        (g["set_temperature"], g["indicator_reading"], g["standard_reading"])
+        for g in payload["groups"]
+    ], detail
+
+    # 不可变：再次以同编号 GET 结果完全一致
+    status, detail_again = request("GET", f"{WEB_BASE}/api/calibrations/{calibration_id}")
+    assert detail_again == detail
+
+
+@check("核验单：单点超差判不合格（正偏差），结论与最大绝对误差一致")
+def _():
+    groups = [
+        {"set_temperature": 100, "indicator_reading": 101, "standard_reading": 100},
+        {"set_temperature": 500, "indicator_reading": 502, "standard_reading": 500},
+        {"set_temperature": 1000, "indicator_reading": 1003, "standard_reading": 1000},
+    ]
+    payload = cal_payload(probe_id="VERIFY-TC-BAD", groups=groups)
+    _, exp_max, exp_verdict = independent_calibration(2.0, groups)
+    assert exp_max == 3 and exp_verdict == "unqualified"
+
+    status, body = request("POST", f"{WEB_BASE}/api/calibrations", payload)
+    assert status == 201, (status, body)
+    assert body["verdict"] == "unqualified" and body["verdict_label"] == "不合格", body
+    assert body["max_abs_error"] == 3.0, body
+    assert body["indication_errors"] == [1.0, 2.0, 3.0], body
+
+    # 详情保持不合格判定
+    status, detail = request("GET", f"{WEB_BASE}/api/calibrations/{body['id']}")
+    assert status == 200 and detail["verdict"] == "unqualified", detail
+
+
+@check("核验单：非法输入（非递增/越界/非正偏差）不增加数据，错误可定位")
+def _():
+    # 先放一张合法单取得稳定基线
+    status, ok = request("POST", f"{WEB_BASE}/api/calibrations",
+                         cal_payload(probe_id="VERIFY-TC-BASELINE"))
+    assert status == 201, (status, ok)
+
+    bad = {
+        "probe_id": "   ",
+        "calibrated_at": "not-a-time",
+        "tolerance": -1,
+        "groups": [
+            {"set_temperature": 100, "indicator_reading": 1500, "standard_reading": 100},
+            {"set_temperature": 100, "indicator_reading": 100, "standard_reading": 100},
+            {"set_temperature": 1000, "indicator_reading": 1000, "standard_reading": -5},
+        ],
+    }
+    status, body = request("POST", f"{WEB_BASE}/api/calibrations", bad)
+    assert status == 422, (status, body)
+    located = {(e["index"], e["field"]) for e in body["detail"]["errors"]}
+    assert (None, "probe_id") in located, located
+    assert (None, "calibrated_at") in located, located
+    assert (None, "tolerance") in located, located
+    assert (0, "indicator_reading") in located, located
+    assert (1, "set_temperature") in located, located  # 非递增
+    assert (2, "standard_reading") in located, located
+
+    # 组数不在 3–12 也拒绝
+    too_few = cal_payload(probe_id="VERIFY-TC-FEW", groups=[
+        {"set_temperature": 100, "indicator_reading": 100, "standard_reading": 100},
+        {"set_temperature": 200, "indicator_reading": 200, "standard_reading": 200},
+    ])
+    status, body = request("POST", f"{WEB_BASE}/api/calibrations", too_few)
+    assert status == 422 and any(e["field"] == "groups" for e in body["detail"]["errors"])
+
+    # 非法输入不增加数据：基线之后的下一个核验单编号尚不存在
+    status, missing = request("GET", f"{WEB_BASE}/api/calibrations/{ok['id'] + 1}")
+    assert status == 404, (status, missing)
+
+    # 既有窑次提交行为不受影响
+    status, batch = request("POST", f"{WEB_BASE}/api/batches", {
+        "name": "VERIFY-AFTER-CAL",
+        "points": [
+            {"time": "2026-09-11T08:00:00Z", "temperature": 600},
+            {"time": "2026-09-11T13:00:00Z", "temperature": 600},
+        ],
+    })
+    assert status == 201 and batch["verdict"] == "underfired", (status, batch)
+
+
+@check("核验单：重复探头编号与校准时间（含时区等价）被拦截且不增加数据")
+def _():
+    payload = cal_payload(probe_id="VERIFY-TC-DUP")
+    status, first = request("POST", f"{WEB_BASE}/api/calibrations", payload)
+    assert status == 201, (status, first)
+
+    # 同探头、同校准时间（读数不同）-> 409，错误定位到探头编号
+    dup = cal_payload(probe_id="VERIFY-TC-DUP", groups=[
+        {"set_temperature": 100, "indicator_reading": 100, "standard_reading": 100},
+        {"set_temperature": 500, "indicator_reading": 501, "standard_reading": 500},
+        {"set_temperature": 1000, "indicator_reading": 999, "standard_reading": 1000},
+    ])
+    status, body = request("POST", f"{WEB_BASE}/api/calibrations", dup)
+    assert status == 409, (status, body)
+    assert body["detail"]["reason"] == "duplicate_calibration", body
+    assert body["detail"]["errors"][0]["field"] == "probe_id", body
+
+    # 同一瞬时的不同时区表示（18:00+08:00 == 10:00Z）也算重复
+    tz_dup = cal_payload(
+        probe_id="VERIFY-TC-DUP",
+        calibrated_at="2026-09-12T18:00:00+08:00",
+    )
+    status, body = request("POST", f"{WEB_BASE}/api/calibrations", tz_dup)
+    assert status == 409 and body["detail"]["reason"] == "duplicate_calibration", body
+
+    # 重复不增加数据：first 之后的编号不存在
+    status, missing = request("GET", f"{WEB_BASE}/api/calibrations/{first['id'] + 1}")
+    assert status == 404, (status, missing)
+
+    # 不同探头编号允许
+    status, other = request(
+        "POST", f"{WEB_BASE}/api/calibrations",
+        cal_payload(probe_id="VERIFY-TC-OTHER"),
+    )
+    assert status == 201, (status, other)
+    assert other["id"] == first["id"] + 1, other
+
+
 def main() -> int:
     print(f"验收目标：api={API_BASE} web={WEB_BASE}")
     if FAILURES:

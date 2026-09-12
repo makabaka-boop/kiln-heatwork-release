@@ -3,6 +3,7 @@ import type {
   ApiFieldError,
   BatchDetail,
   BatchSummary,
+  CalibrationRecord,
   CompareResult,
 } from "./types";
 
@@ -22,9 +23,9 @@ async function parseError(response: Response): Promise<never> {
   const body = (await response.json().catch(() => null)) as {
     detail?: (Partial<ApiErrorDetail> & { reason?: string }) | string;
   } | null;
-  // 携带逐点定位错误的 422（提交/复算）按可定位错误抛出
+  // 携带逐点定位错误的 422（提交/复算）或 409（核验单重复）按可定位错误抛出
   if (
-    response.status === 422 &&
+    (response.status === 422 || response.status === 409) &&
     typeof body?.detail === "object" &&
     Array.isArray(body.detail.errors)
   ) {
@@ -80,4 +81,31 @@ export async function compareBatches(
   const response = await fetch(`${BASE}/batches/${id}/compare/${referenceId}`);
   if (!response.ok) await parseError(response);
   return (await response.json()) as CompareResult;
+}
+
+/** 提交热电偶校准核验单；成功返回不可变记录，非法/重复抛出携带定位错误的异常 */
+export async function createCalibration(payload: {
+  probe_id: string;
+  calibrated_at: string;
+  tolerance: unknown;
+  groups: Array<{
+    set_temperature: unknown;
+    indicator_reading: unknown;
+    standard_reading: unknown;
+  }>;
+}): Promise<CalibrationRecord> {
+  const response = await fetch(`${BASE}/calibrations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) await parseError(response);
+  return (await response.json()) as CalibrationRecord;
+}
+
+/** 按核验单编号读取不可变详情（刷新后据此重新打开） */
+export async function fetchCalibration(id: number): Promise<CalibrationRecord> {
+  const response = await fetch(`${BASE}/calibrations/${id}`);
+  if (!response.ok) await parseError(response);
+  return (await response.json()) as CalibrationRecord;
 }

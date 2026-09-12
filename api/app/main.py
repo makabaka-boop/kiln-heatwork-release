@@ -12,6 +12,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import db
+from .calibration import (
+    CALIBRATION_LABELS,
+    evaluate_calibration,
+    validate_calibration,
+)
 from .compare import build_curve, compare_curves
 from .heatwork import (
     VERDICT_LABELS,
@@ -19,7 +24,7 @@ from .heatwork import (
     compute_segment_contributions,
     round_half_up_1,
 )
-from .validation import parse_iso8601, validate_submission
+from .validation import FieldError, parse_iso8601, validate_submission
 
 
 @asynccontextmanager
@@ -135,6 +140,147 @@ def _recompute_segments(
 @app.get("/api/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# 热电偶校准核验单：创建与详情两个接口
+#
+# 核验单独立于窑次曲线，提交成功即为不可变记录；重复（探头编号+校准时间）、
+# 非递增设定温度、越界读数或非正允许偏差一律拦截，整次不落库，错误定位到
+# 对应输入框。
+# ---------------------------------------------------------------------------
+
+
+def _calibration_payload(
+    normalized,
+    errors_fraction,
+    max_abs_fraction: Fraction,
+    verdict: str,
+) -> Dict[str, Any]:
+    """由规范化输入与精确计算结果组装创建/详情统一的响应体。"""
+    groups: List[Dict[str, Any]] = []
+    for index, group in enumerate(normalized.groups):
+        groups.append(
+            {
+                "index": index,
+                "set_temperature": group.set_temperature,
+                "indicator_reading": group.indicator_reading,
+                "standard_reading": group.standard_reading,
+                "indication_error": float(errors_fraction[index]),
+            }
+        )
+    return {
+        "probe_id": normalized.probe_id,
+        "calibrated_at": normalized.calibrated_at_raw,
+        "tolerance": normalized.tolerance,
+        "groups": groups,
+        "group_count": len(groups),
+        "indication_errors": [float(value) for value in errors_fraction],
+        "max_abs_error": float(max_abs_fraction),
+        "verdict": verdict,
+        "verdict_label": CALIBRATION_LABELS[verdict],
+    }
+
+
+@app.post("/api/calibrations", status_code=201)
+def create_calibration(payload: Dict[str, Any] = Body(...)) -> Any:
+    normalized, errors = validate_calibration(payload)
+    if errors:
+        # 任一非法输入 -> 整次不落库，返回全部可定位错误
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": {
+                    "message": "校准核验数据未通过校验，本次数据未保存。",
+                    "errors": [error.to_dict() for error in errors],
+                }
+            },
+        )
+
+    assert normalized is not None
+    verdict, errors_fraction, max_abs_fraction = evaluate_calibration(normalized)
+    try:
+        record = db.insert_calibration(
+            probe_id=normalized.probe_id,
+            calibrated_at=normalized.calibrated_at_raw,
+            calibrated_at_utc=normalized.calibrated_at_utc.isoformat(),
+            tolerance=normalized.tolerance,
+            groups=[
+                {
+                    "set_temperature": group.set_temperature,
+                    "indicator_reading": group.indicator_reading,
+                    "standard_reading": group.standard_reading,
+                }
+                for group in normalized.groups
+            ],
+            indication_errors=[float(value) for value in errors_fraction],
+            max_abs_error=float(max_abs_fraction),
+            verdict=verdict,
+        )
+    except db.CalibrationDuplicate:
+        # 重复探头编号与校准时间：不新增记录，错误定位到探头编号输入处
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": {
+                    "reason": "duplicate_calibration",
+                    "message": "校准核验数据未保存。",
+                    "errors": [
+                        FieldError(
+                            None,
+                            "probe_id",
+                            f"探头 {normalized.probe_id} 在该校准时间"
+                            f"（{normalized.calibrated_at_raw}）已有核验单，"
+                            "不能重复提交。",
+                        ).to_dict()
+                    ],
+                }
+            },
+        )
+
+    body = _calibration_payload(
+        normalized, errors_fraction, max_abs_fraction, verdict
+    )
+    return {"id": record["id"], "created_at": record["created_at"], **body}
+
+
+@app.get("/api/calibrations/{calibration_id}")
+def get_calibration(calibration_id: int) -> Any:
+    record = db.get_calibration(calibration_id)
+    if record is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": {
+                    "reason": "calibration_not_found",
+                    "message": f"校准核验单 {calibration_id} 不存在",
+                }
+            },
+        )
+    # 详情逐字回显已存读数与示值误差，并重建带 index 的逐组视图作为判定依据
+    groups = [
+        {
+            "index": index,
+            "set_temperature": group["set_temperature"],
+            "indicator_reading": group["indicator_reading"],
+            "standard_reading": group["standard_reading"],
+            "indication_error": record["indication_errors"][index],
+        }
+        for index, group in enumerate(record["groups"])
+    ]
+    return {
+        "id": record["id"],
+        "probe_id": record["probe_id"],
+        "calibrated_at": record["calibrated_at"],
+        "tolerance": record["tolerance"],
+        "groups": groups,
+        "group_count": record["group_count"],
+        "indication_errors": record["indication_errors"],
+        "max_abs_error": record["max_abs_error"],
+        "verdict": record["verdict"],
+        "verdict_label": CALIBRATION_LABELS[record["verdict"]],
+        "created_at": record["created_at"],
+    }
 
 
 @app.post("/api/batches", status_code=201)

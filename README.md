@@ -35,6 +35,66 @@ WEB_PORT=9000 API_PORT=9001 docker compose up --build
 `legacy-seed`（仅 verify profile）会先向 api 的卷写入两条模拟
 「升级前保存」的旧记录（无分段明细），verify 借此验收升级兼容性。
 
+## 热电偶校准核验
+
+现场更换或年检热电偶后，质检员需要留存**独立于窑次曲线**的校准核验单，
+不能仅凭某窑次曲线判断传感器还能否投入使用。页面顶部切到
+「热电偶校准核验」页签后填写探头编号、校准时间、允许偏差与
+**三至十二组**（设定温度、仪表读数、标准器读数），系统逐组计算
+示值误差（仪表读数 − 标准器读数）与最大绝对误差，并给出唯一结论：
+
+- 最大绝对误差 **≤ 允许偏差** → **合格**（边界恰等算合格）；
+- 最大绝对误差 **> 允许偏差** → **不合格**，超差行就地标注。
+
+提交成功后核验单作为**不可变记录**保存（仅创建与详情，无修改/删除入口），
+页面转入详情展示判定依据；刷新后可凭详情中的**核验单编号**在
+「按编号打开核验单」处重新打开。计算全程按十进制字面值做精确有理数
+运算，避免浮点误差影响「恰等于允许偏差」的边界判定。
+
+提交校验（任一不通过即整次不落库，错误定位到对应输入处）：
+
+| 规则 | 错误定位 |
+| --- | --- |
+| 探头编号非空（≤ 80 字符） | 探头编号框 |
+| 校准时间为合法 ISO 8601（须含时刻；无时区按 UTC） | 校准时间框 |
+| 允许偏差为正数（°C） | 允许偏差框 |
+| 校准组 3–12 个 | 表单整体错误区 |
+| 各设定温度 / 仪表读数 / 标准器读数为 0–1400°C 的数字 | 对应该组对应框 |
+| 设定温度严格递增（由低到高） | 对应该组设定温度框 |
+| 同探头编号 + 同校准时间（不同时区的同一瞬时也算）不得重复 | 探头编号框（409） |
+
+新增接口（复用现有 SQLite 连接、错误响应结构与容器服务）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/calibrations` | 提交核验单；201 返回逐组示值误差与结论，422 返回全部定位错误，409 表示重复 |
+| GET | `/api/calibrations/{id}` | 不可变详情，含逐组读数、示值误差、最大绝对误差与判定结论 |
+
+提交体：
+
+```json
+{
+  "probe_id": "TC-K-2026-0912-01",
+  "calibrated_at": "2026-09-12T10:00:00Z",
+  "tolerance": 2.0,
+  "groups": [
+    {"set_temperature": 100, "indicator_reading": 101, "standard_reading": 100},
+    {"set_temperature": 500, "indicator_reading": 502, "standard_reading": 500},
+    {"set_temperature": 1000, "indicator_reading": 998, "standard_reading": 1000}
+  ]
+}
+```
+
+201/200 响应：`probe_id`、`calibrated_at`、`tolerance`、
+`groups`（每组带 `index` 与 `indication_error`）、
+`indication_errors`、`max_abs_error`、
+`verdict` ∈ `qualified | unqualified`、`verdict_label` 为 `合格 | 不合格`；
+创建响应另带 `id`、`created_at`。422 错误响应结构与窑次提交一致
+（`detail.message` + `detail.errors[]`，错误带 `index`/`field`）；
+重复为 409，`detail.reason = duplicate_calibration` 并附定位到
+探头编号框的 `errors`；详情不存在为 404，
+`detail.reason = calibration_not_found`。
+
 ```bash
 docker compose --profile verify up --build --exit-code-from verify --abort-on-container-exit
 ```
@@ -187,6 +247,8 @@ docker compose --profile verify up --build --exit-code-from verify --abort-on-co
 | POST | `/api/batches/{id}/recompute` | 按当前规则复算该窑次；201 返回新窑次与来源摘要，404/422 区分失败原因 |
 | GET | `/api/batches/{id}/compare/{reference_id}` | 与参照窑次对比升温轨迹与累计计热（只读）；200 返回对齐节点、两类差值与双方摘要，404/422 区分失败原因 |
 | GET | `/api/batches/{id}/compare?reference_id={reference_id}` | 上一条的约定查询式入口，参照窑次改由查询参数给出；响应与失败原因完全一致 |
+| POST | `/api/calibrations` | 提交热电偶校准核验单；201 返回逐组示值误差与结论，422 返回全部定位错误，409 表示探头编号+校准时间重复 |
+| GET | `/api/calibrations/{id}` | 核验单不可变详情，含逐组读数、示值误差、最大绝对误差与结论 |
 
 提交体：
 
@@ -244,13 +306,13 @@ docker compose --profile verify up --build --exit-code-from verify --abort-on-co
 ## 测试
 
 ```bash
-# 后端：积分边界、分段明细、校验、API 落库、复算、轨迹对比、旧库升级兼容（88 例）
+# 后端：积分边界、分段明细、校验、API 落库、复算、轨迹对比、旧库升级兼容、热电偶校准核验（105 例）
 cd api && pip install -r requirements-dev.txt && pytest
 
-# 前端：错误映射、结论展示、分段明细表、表单交互、复算流程、轨迹对比（33 例）
+# 前端：错误映射、结论展示、分段明细表、表单交互、复算流程、轨迹对比、校准核验（48 例）
 cd web && npm ci && npm test
 
-# 真实联调：浏览器 -> web -> api -> SQLite（5 例）
+# 真实联调：浏览器 -> web -> api -> SQLite（8 例：窑次 5 + 校准核验 3）
 docker compose up --build -d          # 或本地起 uvicorn + vite preview
 cd web && npx playwright install chromium
 PLAYWRIGHT_BASE_URL=http://localhost:8080 npm run test:e2e
@@ -281,15 +343,16 @@ cd web && npm ci && npm run dev        # http://localhost:5173（/api 已代理�
 ├── docker-compose.yml      # web / api / verify / legacy-seed 服务
 ├── api/                    # FastAPI 后端
 │   ├── app/heatwork.py     #   计热积分与逐段贡献（精确有理数 + half-up 舍入）
+│   ├── app/calibration.py  #   热电偶核验：示值误差、最大绝对误差与合格判定
 │   ├── app/compare.py      #   两窑次轨迹对比（对齐时间轴上的温度差与累计计热差）
 │   ├── app/validation.py   #   逐点校验，收集全部可定位错误
 │   ├── app/db.py           #   SQLite 落库与旧表就地升级
-│   └── tests/              #   pytest：积分边界 / 分段明细 / 校验 / 对比 / 升级兼容
+│   └── tests/              #   pytest：积分边界 / 分段明细 / 校验 / 对比 / 升级兼容 / 校准核验
 ├── web/                    # React 前端
-│   ├── src/components/     #   表单（逐点错误定位）、结果、分段明细、历史、详情、轨迹对比
+│   ├── src/components/     #   表单（逐点错误定位）、结果、分段明细、历史、详情、轨迹对比、校准核验
 │   ├── src/__tests__/      #   Vitest 单元与组件测试
 │   └── e2e/                #   Playwright 真实联调
 └── verify/                 # 一次性验收服务（独立复算 + 真实 HTTP）
-    ├── verify.py           #   验收用例
+    ├── verify.py           #   验收用例（含热电偶校准核验闭环）
     └── legacy_seed.py      #   写入模拟「升级前」的旧记录（仅 verify profile）
 ```

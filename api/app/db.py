@@ -33,6 +33,21 @@ CREATE TABLE IF NOT EXISTS batches (
     source_batch_id INTEGER,
     recomputed_at TEXT,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS calibrations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    probe_id TEXT NOT NULL,
+    calibrated_at TEXT NOT NULL,
+    calibrated_at_utc TEXT NOT NULL,
+    tolerance REAL NOT NULL,
+    groups_json TEXT NOT NULL,
+    group_count INTEGER NOT NULL,
+    indication_errors_json TEXT NOT NULL,
+    max_abs_error REAL NOT NULL,
+    verdict TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (probe_id, calibrated_at_utc)
 )
 """
 
@@ -157,4 +172,100 @@ def get_batch(batch_id: int) -> Optional[Dict[str, Any]]:
 def count_batches() -> int:
     with _connect() as conn:
         (count,) = conn.execute("SELECT COUNT(*) FROM batches").fetchone()
+    return count
+
+
+# ---------------------------------------------------------------------------
+# 热电偶校准核验单
+#
+# 核验单是独立于窑次曲线的不可变记录：仅提供创建与详情读取，没有更新、
+# 删除入口。(探头编号, 归一化为 UTC 的校准时间) 建唯一索引，重复提交被
+# 数据库与服务层双重拦截，绝不落库。
+# ---------------------------------------------------------------------------
+
+
+class CalibrationDuplicate(Exception):
+    """同一探头编号与校准时间的核验单已存在。"""
+
+
+def insert_calibration(
+    *,
+    probe_id: str,
+    calibrated_at: str,
+    calibrated_at_utc: str,
+    tolerance: float,
+    groups: List[Dict[str, Any]],
+    indication_errors: List[float],
+    max_abs_error: float,
+    verdict: str,
+) -> Dict[str, Any]:
+    created_at = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        try:
+            cursor = conn.execute(
+                """
+                INSERT INTO calibrations
+                    (probe_id, calibrated_at, calibrated_at_utc, tolerance,
+                     groups_json, group_count, indication_errors_json,
+                     max_abs_error, verdict, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    probe_id,
+                    calibrated_at,
+                    calibrated_at_utc,
+                    tolerance,
+                    json.dumps(groups, ensure_ascii=False),
+                    len(groups),
+                    json.dumps(indication_errors, ensure_ascii=False),
+                    max_abs_error,
+                    verdict,
+                    created_at,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            # UNIQUE(probe_id, calibrated_at_utc)：重复核验单整次不落库
+            raise CalibrationDuplicate(probe_id, calibrated_at) from exc
+        calibration_id = cursor.lastrowid
+    return {
+        "id": calibration_id,
+        "probe_id": probe_id,
+        "calibrated_at": calibrated_at,
+        "tolerance": tolerance,
+        "groups": groups,
+        "group_count": len(groups),
+        "indication_errors": indication_errors,
+        "max_abs_error": max_abs_error,
+        "verdict": verdict,
+        "created_at": created_at,
+    }
+
+
+def _calibration_from_row(row: sqlite3.Row) -> Dict[str, Any]:
+    record = dict(row)
+    record["groups"] = json.loads(record.pop("groups_json"))
+    record["indication_errors"] = json.loads(record.pop("indication_errors_json"))
+    record["group_count"] = record.pop("group_count")
+    return record
+
+
+def get_calibration(calibration_id: int) -> Optional[Dict[str, Any]]:
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT id, probe_id, calibrated_at, tolerance, groups_json,
+                   group_count, indication_errors_json, max_abs_error,
+                   verdict, created_at
+            FROM calibrations WHERE id = ?
+            """,
+            (calibration_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return _calibration_from_row(row)
+
+
+def count_calibrations() -> int:
+    with _connect() as conn:
+        (count,) = conn.execute("SELECT COUNT(*) FROM calibrations").fetchone()
     return count
