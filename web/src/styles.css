@@ -86,16 +86,19 @@ main {
 }
 
 input,
-textarea {
+textarea,
+select {
   width: 100%;
   padding: 7px 9px;
   border: 1px solid var(--line);
   border-radius: 6px;
   font: inherit;
+  background: #fff;
 }
 
 input:focus,
-textarea:focus {
+textarea:focus,
+select:focus {
   outline: 2px solid rgba(29, 78, 216, 0.35);
   border-color: var(--accent);
 }
@@ -330,6 +333,26 @@ button.primary:hover:not(:disabled) {
 
 .recompute-actions .field-error {
   margin-top: 0;
+}
+
+.compare-panel .field {
+  margin-bottom: 8px;
+}
+
+.compare-status {
+  margin: 4px 0;
+  color: var(--muted);
+  font-size: 13.5px;
+}
+
+.compare-summary {
+  margin: 8px 0;
+  color: var(--muted);
+  font-size: 13.5px;
+}
+
+.compare-table {
+  font-size: 13.5px;
 }
 
 .history-table tbody tr {

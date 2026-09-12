@@ -30,7 +30,8 @@ WEB_PORT=9000 API_PORT=9001 docker compose up --build
 `verify` 是一次性验收服务，对运行中的 web 与 api 做真实 HTTP 联调：
 经 nginx 代理提交合法/边界/非法批次，并用**独立复写的积分实现**复核
 积分、舍入、结论、分段明细与落库行为，另覆盖「按当前规则复算」的
-成功、失败与来源展示链路，全部通过则以退出码 0 结束。
+成功、失败与来源展示链路，以及「轨迹对比」的等价曲线零差值、局部偏差
+符号与数值、失败原因区分与只读性，全部通过则以退出码 0 结束。
 `legacy-seed`（仅 verify profile）会先向 api 的卷写入两条模拟
 「升级前保存」的旧记录（无分段明细），verify 借此验收升级兼容性。
 
@@ -133,6 +134,35 @@ docker compose --profile verify up --build --exit-code-from verify --abort-on-co
 
 复算失败时页面停留在原详情并显示提示，不清除当前选择。
 
+## 轨迹对比
+
+同一配方的两次窑烧采样频率可能不同。质检员在历史详情中选择另一窑次
+作为**参照**后，页面请求两条记录的对比结果，用于判断升温轨迹与累计
+计热从何时开始偏离；切换参照立即重算。对比全程**只读**：不改写任何
+历史记录与原判定，不写库，也不改变既有创建、列表和详情响应。
+
+对齐与求值约定（复用现有计热实现）：
+
+1. 两条曲线各自以**首个采样时刻**为经过 0 分钟对齐；
+2. 共同持续区间为 `[0, min(双方持续分钟数)]`，求值时间轴为两条曲线
+   所有采样时刻（换算成经过分钟）的**并集**，限制在共同区间内；
+3. 每个对齐节点输出**温度差**（°C）与**累计计热差**（°C·min），
+   差值 = 当前记录 − 参照记录；温度按段内线性插值，累计计热仍只累计
+   高于 600 °C 的部分（跨越起点先求交点再切段），全程精确有理数运算；
+4. 对比接口只返回对齐节点、两类差值及双方摘要（编号、名称、展示值、
+   结论与提交时间）。
+
+失败响应按原因区分，且均不改变任何已存数据：
+
+| 情形 | 状态码 | `detail.reason` |
+| --- | --- | --- |
+| 任一记录不存在 | 404 | `batch_not_found` |
+| 已存采样点无法形成合法时间序列（如升级前旧记录） | 422 | `series_invalid` |
+| 两者没有正长度共同区间（如一方只有单个采样点） | 422 | `no_common_interval` |
+
+对比失败时页面保留当前详情与已选参照，仅在对比区域就地提示；
+「按当前规则复算」入口不受影响，仍可独立使用。
+
 ## 提交校验
 
 | 规则 | 错误定位 |
@@ -155,6 +185,7 @@ docker compose --profile verify up --build --exit-code-from verify --abort-on-co
 | GET | `/api/batches` | 历史列表（新的在前），复算记录带来源标识 |
 | GET | `/api/batches/{id}` | 详情，含原始采样点、未舍入积分与分段明细 |
 | POST | `/api/batches/{id}/recompute` | 按当前规则复算该窑次；201 返回新窑次与来源摘要，404/422 区分失败原因 |
+| GET | `/api/batches/{id}/compare/{reference_id}` | 与参照窑次对比升温轨迹与累计计热（只读）；200 返回对齐节点、两类差值与双方摘要，404/422 区分失败原因 |
 
 提交体：
 
@@ -192,16 +223,33 @@ docker compose --profile verify up --build --exit-code-from verify --abort-on-co
 }
 ```
 
+对比 200 响应（节选）：`batch` / `reference` 为双方摘要，
+`common_minutes` 为共同持续区间长度，`nodes` 为对齐节点
+（`elapsed_minutes` 经过分钟、`temperature_delta` 温度差、
+`heatwork_delta` 累计计热差，均为当前记录 − 参照记录）：
+
+```json
+{
+  "batch": {"id": 3, "name": "K-2026-0911-A", "point_count": 6, "integral_display": "24000.0", "verdict": "qualified", "verdict_label": "合格", "created_at": "…"},
+  "reference": {"id": 1, "name": "K-2026-0910-B", "point_count": 4, "integral_display": "21000.0", "verdict": "qualified", "verdict_label": "合格", "created_at": "…"},
+  "common_minutes": 300,
+  "nodes": [
+    {"elapsed_minutes": 0, "temperature_delta": 0, "heatwork_delta": 0},
+    {"elapsed_minutes": 30, "temperature_delta": 25, "heatwork_delta": 375}
+  ]
+}
+```
+
 ## 测试
 
 ```bash
-# 后端：积分边界、分段明细、校验、API 落库、复算、旧库升级兼容（67 例）
+# 后端：积分边界、分段明细、校验、API 落库、复算、轨迹对比、旧库升级兼容（83 例）
 cd api && pip install -r requirements-dev.txt && pytest
 
-# 前端：错误映射、结论展示、分段明细表、表单交互、复算流程（24 例）
+# 前端：错误映射、结论展示、分段明细表、表单交互、复算流程、轨迹对比（32 例）
 cd web && npm ci && npm test
 
-# 真实联调：浏览器 -> web -> api -> SQLite（4 例）
+# 真实联调：浏览器 -> web -> api -> SQLite（5 例）
 docker compose up --build -d          # 或本地起 uvicorn + vite preview
 cd web && npx playwright install chromium
 PLAYWRIGHT_BASE_URL=http://localhost:8080 npm run test:e2e
@@ -232,11 +280,12 @@ cd web && npm ci && npm run dev        # http://localhost:5173（/api 已代理�
 ├── docker-compose.yml      # web / api / verify / legacy-seed 服务
 ├── api/                    # FastAPI 后端
 │   ├── app/heatwork.py     #   计热积分与逐段贡献（精确有理数 + half-up 舍入）
+│   ├── app/compare.py      #   两窑次轨迹对比（对齐时间轴上的温度差与累计计热差）
 │   ├── app/validation.py   #   逐点校验，收集全部可定位错误
 │   ├── app/db.py           #   SQLite 落库与旧表就地升级
-│   └── tests/              #   pytest：积分边界 / 分段明细 / 校验 / 升级兼容
+│   └── tests/              #   pytest：积分边界 / 分段明细 / 校验 / 对比 / 升级兼容
 ├── web/                    # React 前端
-│   ├── src/components/     #   表单（逐点错误定位）、结果、分段明细、历史、详情
+│   ├── src/components/     #   表单（逐点错误定位）、结果、分段明细、历史、详情、轨迹对比
 │   ├── src/__tests__/      #   Vitest 单元与组件测试
 │   └── e2e/                #   Playwright 真实联调
 └── verify/                 # 一次性验收服务（独立复算 + 真实 HTTP）

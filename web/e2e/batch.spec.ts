@@ -142,6 +142,80 @@ test.describe("窑炉烧成判定台联调", () => {
     );
   });
 
+  test("轨迹对比：选择参照后展示对齐节点差值，切换参照立即重算", async ({
+    page,
+  }) => {
+    // 局部升温偏差曲线：前 60 min 就升到 700°C，之后与示例曲线一致
+    const DEVIATED_POINTS = [
+      { time: "2026-09-11T08:00:00Z", temperature: 600 },
+      { time: "2026-09-11T08:30:00Z", temperature: 650 },
+      { time: "2026-09-11T09:00:00Z", temperature: 700 },
+      { time: "2026-09-11T10:00:00Z", temperature: 700 },
+      { time: "2026-09-11T12:00:00Z", temperature: 700 },
+      { time: "2026-09-11T13:00:00Z", temperature: 600 },
+    ];
+    await page.goto("/");
+
+    // 参照窑次：示例曲线（4 点）
+    await page.getByTestId("sample-fill").click();
+    const referenceName = `K-E2E-CMP-REF-${Date.now()}`;
+    await page.getByTestId("name-input").fill(referenceName);
+    await page.getByTestId("submit-batch").click();
+    await expect(page.getByTestId("result-verdict")).toHaveText("合格");
+
+    // 当前窑次：局部升温偏差曲线（6 点）
+    await page.getByTestId("json-toggle").click();
+    await page.getByTestId("json-input").fill(JSON.stringify(DEVIATED_POINTS));
+    await page.getByTestId("json-fill").click();
+    const currentName = `K-E2E-CMP-CUR-${Date.now()}`;
+    await page.getByTestId("name-input").fill(currentName);
+    await page.getByTestId("submit-batch").click();
+    await expect(page.getByTestId("result-verdict")).toHaveText("合格");
+
+    // 打开当前窑次详情，选择参照窑次
+    await page
+      .getByTestId("history-table")
+      .locator("tr", { hasText: currentName })
+      .first()
+      .click();
+    await expect(page.getByTestId("batch-detail")).toBeVisible();
+    const select = page.getByTestId("compare-reference-select");
+    const referenceValue = await select
+      .locator("option", { hasText: referenceName })
+      .getAttribute("value");
+    await select.selectOption(referenceValue ?? "");
+
+    // 共同持续区间 300 分钟，对齐节点为双方采样时刻的并集（6 个）
+    await expect(page.getByTestId("compare-table")).toBeVisible();
+    await expect(page.getByTestId("compare-summary")).toContainText(
+      "共同持续区间为 300 分钟",
+    );
+    await expect(page.getByTestId("compare-summary")).toContainText(
+      referenceName,
+    );
+    // 偏差段温度差为正，回归同一轨迹后为 0；累计计热差保持 +3000
+    await expect(page.getByTestId("compare-1-elapsed")).toHaveText("30");
+    await expect(page.getByTestId("compare-1-temperature-delta")).toHaveText(
+      "+25",
+    );
+    await expect(page.getByTestId("compare-2-temperature-delta")).toHaveText(
+      "+50",
+    );
+    await expect(page.getByTestId("compare-2-heatwork-delta")).toHaveText(
+      "+1500",
+    );
+    await expect(page.getByTestId("compare-3-temperature-delta")).toHaveText(
+      "0",
+    );
+    await expect(page.getByTestId("compare-5-heatwork-delta")).toHaveText(
+      "+3000",
+    );
+
+    // 切换参照立即重算：换回空选择后对比结果消失
+    await select.selectOption("");
+    await expect(page.getByTestId("compare-table")).toHaveCount(0);
+  });
+
   test("非法提交：错误定位到具体采样点，且整次不落库", async ({ page }) => {
     await page.goto("/");
     const before = await page

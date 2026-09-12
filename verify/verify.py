@@ -68,6 +68,59 @@ def independent_verdict(display: str) -> str:
     return "overfired"
 
 
+def independent_segment_area(dt_min: Fraction, e0: Fraction, e1: Fraction) -> Fraction:
+    """独立复写：单段对 max(T-600, 0) 的积分（dt 为段长分钟）。"""
+    if e0 <= 0 and e1 <= 0:
+        return Fraction(0)
+    if e0 > 0 and e1 > 0:
+        return (e0 + e1) * dt_min / 2
+    s_star = e0 / (e0 - e1)
+    if e0 > 0:
+        return e0 * s_star * dt_min / 2
+    return e1 * (1 - s_star) * dt_min / 2
+
+
+def independent_eval(points: list[tuple[datetime, float]], elapsed: Fraction):
+    """独立复写：经过 elapsed 分钟处的 (温度, 累计计热)，段内线性插值。"""
+    first = points[0][0]
+    timeline = [_minutes_of(moment - first) for moment, _ in points]
+    temps = [Fraction(temp) for _, temp in points]
+    if elapsed <= 0:
+        return temps[0], Fraction(0)
+    heat = Fraction(0)
+    for index in range(len(timeline) - 1):
+        t0, t1 = timeline[index], timeline[index + 1]
+        if elapsed < t1:
+            temp = temps[index] + (temps[index + 1] - temps[index]) * (elapsed - t0) / (t1 - t0)
+            heat += independent_segment_area(elapsed - t0, temps[index] - 600, temp - 600)
+            return temp, heat
+        heat += independent_segment_area(t1 - t0, temps[index] - 600, temps[index + 1] - 600)
+    return temps[-1], heat
+
+
+def independent_compare(
+    current: list[tuple[datetime, float]], reference: list[tuple[datetime, float]]
+):
+    """独立复写：共同持续区间内并集时间轴上的逐节点 (经过分钟, 温度差, 计热差)。"""
+    def elapsed_nodes(points):
+        return {_minutes_of(moment - points[0][0]) for moment, _ in points}
+
+    common = min(
+        _minutes_of(current[-1][0] - current[0][0]),
+        _minutes_of(reference[-1][0] - reference[0][0]),
+    )
+    assert common > 0, "验收用例应始终有正长度共同区间"
+    timeline = sorted(
+        t for t in elapsed_nodes(current) | elapsed_nodes(reference) if t <= common
+    )
+    nodes = []
+    for t in timeline:
+        temp_c, heat_c = independent_eval(current, t)
+        temp_r, heat_r = independent_eval(reference, t)
+        nodes.append((t, temp_c - temp_r, heat_c - heat_r))
+    return common, nodes
+
+
 # ---------- HTTP 辅助 ----------
 
 def request(method: str, url: str, payload: dict | None = None) -> tuple[int, object]:
@@ -496,6 +549,204 @@ def _():
     status, after = request("GET", f"{WEB_BASE}/api/batches")
     assert status == 200, status
     assert len(after["batches"]) == count_before, "复算失败不应新增记录"
+
+
+# ---------- 轨迹对比 ----------
+
+# 标准曲线（4 点）与同一轨迹按 30 min 加密采样的曲线（11 点）：轨迹等价
+COMPARE_STANDARD = RECOMPUTE_CURVE
+COMPARE_STANDARD_MOMENTS = RECOMPUTE_MOMENTS
+
+COMPARE_DENSE = [
+    {"time": "2026-09-11T08:00:00Z", "temperature": 600},
+    {"time": "2026-09-11T08:30:00Z", "temperature": 625},
+    {"time": "2026-09-11T09:00:00Z", "temperature": 650},
+    {"time": "2026-09-11T09:30:00Z", "temperature": 675},
+    {"time": "2026-09-11T10:00:00Z", "temperature": 700},
+    {"time": "2026-09-11T10:30:00Z", "temperature": 700},
+    {"time": "2026-09-11T11:00:00Z", "temperature": 700},
+    {"time": "2026-09-11T11:30:00Z", "temperature": 700},
+    {"time": "2026-09-11T12:00:00Z", "temperature": 700},
+    {"time": "2026-09-11T12:30:00Z", "temperature": 650},
+    {"time": "2026-09-11T13:00:00Z", "temperature": 600},
+]
+COMPARE_DENSE_MOMENTS = [
+    (datetime(2026, 9, 11, 8, 0, tzinfo=timezone.utc), 600.0),
+    (datetime(2026, 9, 11, 8, 30, tzinfo=timezone.utc), 625.0),
+    (datetime(2026, 9, 11, 9, 0, tzinfo=timezone.utc), 650.0),
+    (datetime(2026, 9, 11, 9, 30, tzinfo=timezone.utc), 675.0),
+    (datetime(2026, 9, 11, 10, 0, tzinfo=timezone.utc), 700.0),
+    (datetime(2026, 9, 11, 10, 30, tzinfo=timezone.utc), 700.0),
+    (datetime(2026, 9, 11, 11, 0, tzinfo=timezone.utc), 700.0),
+    (datetime(2026, 9, 11, 11, 30, tzinfo=timezone.utc), 700.0),
+    (datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc), 700.0),
+    (datetime(2026, 9, 11, 12, 30, tzinfo=timezone.utc), 650.0),
+    (datetime(2026, 9, 11, 13, 0, tzinfo=timezone.utc), 600.0),
+]
+
+# 局部升温偏差：前 60 min 就升到 700°C，之后与标准曲线一致
+COMPARE_DEVIATED = [
+    {"time": "2026-09-11T08:00:00Z", "temperature": 600},
+    {"time": "2026-09-11T08:30:00Z", "temperature": 650},
+    {"time": "2026-09-11T09:00:00Z", "temperature": 700},
+    {"time": "2026-09-11T10:00:00Z", "temperature": 700},
+    {"time": "2026-09-11T12:00:00Z", "temperature": 700},
+    {"time": "2026-09-11T13:00:00Z", "temperature": 600},
+]
+COMPARE_DEVIATED_MOMENTS = [
+    (datetime(2026, 9, 11, 8, 0, tzinfo=timezone.utc), 600.0),
+    (datetime(2026, 9, 11, 8, 30, tzinfo=timezone.utc), 650.0),
+    (datetime(2026, 9, 11, 9, 0, tzinfo=timezone.utc), 700.0),
+    (datetime(2026, 9, 11, 10, 0, tzinfo=timezone.utc), 700.0),
+    (datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc), 700.0),
+    (datetime(2026, 9, 11, 13, 0, tzinfo=timezone.utc), 600.0),
+]
+
+
+def assert_compare_nodes_match(body: dict, current_moments, reference_moments):
+    """响应中的对齐节点与独立复算逐一一致，返回 {经过分钟: 节点}。"""
+    common, expected = independent_compare(current_moments, reference_moments)
+    assert abs(body["common_minutes"] - float(common)) < 1e-9, body
+    assert len(body["nodes"]) == len(expected), body
+    for node, (t, dtemp, dheat) in zip(body["nodes"], expected):
+        assert abs(node["elapsed_minutes"] - float(t)) < 1e-9, node
+        assert abs(node["temperature_delta"] - float(dtemp)) < 1e-9, node
+        assert abs(node["heatwork_delta"] - float(dheat)) < 1e-9, node
+    return {node["elapsed_minutes"]: node for node in body["nodes"]}
+
+
+@check("对比：采样间隔不同但轨迹等价的两窑，各节点差值为零")
+def _():
+    status, current = request(
+        "POST", f"{WEB_BASE}/api/batches", {"name": "VERIFY-CMP-STD", "points": COMPARE_STANDARD}
+    )
+    assert status == 201, (status, current)
+    status, reference = request(
+        "POST", f"{WEB_BASE}/api/batches", {"name": "VERIFY-CMP-DENSE", "points": COMPARE_DENSE}
+    )
+    assert status == 201, (status, reference)
+
+    status, listing = request("GET", f"{WEB_BASE}/api/batches")
+    count_before = len(listing["batches"])
+
+    status, body = request(
+        "GET", f"{WEB_BASE}/api/batches/{current['id']}/compare/{reference['id']}"
+    )
+    assert status == 200, (status, body)
+    # 只返回对齐节点、两类差值及双方摘要
+    assert set(body) == {"batch", "reference", "common_minutes", "nodes"}, body
+    assert body["batch"]["id"] == current["id"], body
+    assert body["batch"]["name"] == "VERIFY-CMP-STD", body
+    assert body["batch"]["verdict_label"] == "合格", body
+    assert body["reference"]["id"] == reference["id"], body
+    assert body["reference"]["name"] == "VERIFY-CMP-DENSE", body
+    # 与独立复算一致，且轨迹等价 -> 各节点差值恰为零
+    nodes = assert_compare_nodes_match(body, COMPARE_STANDARD_MOMENTS, COMPARE_DENSE_MOMENTS)
+    assert sorted(nodes) == [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300]
+    for node in nodes.values():
+        assert node["temperature_delta"] == 0, node
+        assert node["heatwork_delta"] == 0, node
+
+    # 对比为只读：记录数不变
+    status, after = request("GET", f"{WEB_BASE}/api/batches")
+    assert len(after["batches"]) == count_before, "对比不应新增记录"
+
+
+@check("对比：局部升温偏差经插值后的符号与数值")
+def _():
+    status, current = request(
+        "POST", f"{WEB_BASE}/api/batches", {"name": "VERIFY-CMP-DEV", "points": COMPARE_DEVIATED}
+    )
+    assert status == 201, (status, current)
+    status, reference = request(
+        "POST", f"{WEB_BASE}/api/batches", {"name": "VERIFY-CMP-STD-2", "points": COMPARE_STANDARD}
+    )
+    assert status == 201, (status, reference)
+
+    status, body = request(
+        "GET", f"{WEB_BASE}/api/batches/{current['id']}/compare/{reference['id']}"
+    )
+    assert status == 200, (status, body)
+    nodes = assert_compare_nodes_match(body, COMPARE_DEVIATED_MOMENTS, COMPARE_STANDARD_MOMENTS)
+    assert sorted(nodes) == [0, 30, 60, 120, 240, 300]
+    # 温度差：偏差段为正（+25 / +50），回归同一轨迹后为 0
+    assert nodes[0]["temperature_delta"] == 0, nodes[0]
+    assert nodes[30]["temperature_delta"] == 25, nodes[30]
+    assert nodes[60]["temperature_delta"] == 50, nodes[60]
+    assert nodes[120]["temperature_delta"] == 0, nodes[120]
+    assert nodes[300]["temperature_delta"] == 0, nodes[300]
+    # 累计计热差：偏差段逐步拉大（+375 / +1500 / +3000），之后保持 +3000
+    assert nodes[30]["heatwork_delta"] == 375, nodes[30]
+    assert nodes[60]["heatwork_delta"] == 1500, nodes[60]
+    assert nodes[120]["heatwork_delta"] == 3000, nodes[120]
+    assert nodes[240]["heatwork_delta"] == 3000, nodes[240]
+    assert nodes[300]["heatwork_delta"] == 3000, nodes[300]
+
+    # 反向对比：符号全部取反
+    status, reverse = request(
+        "GET", f"{WEB_BASE}/api/batches/{reference['id']}/compare/{current['id']}"
+    )
+    assert status == 200, (status, reverse)
+    reversed_nodes = {node["elapsed_minutes"]: node for node in reverse["nodes"]}
+    assert reversed_nodes[30]["temperature_delta"] == -25, reversed_nodes[30]
+    assert reversed_nodes[60]["heatwork_delta"] == -1500, reversed_nodes[60]
+    assert reversed_nodes[300]["heatwork_delta"] == -3000, reversed_nodes[300]
+
+
+@check("对比：非法旧记录与缺失记录区分原因失败，且不影响既有数据")
+def _():
+    status, listing = request("GET", f"{WEB_BASE}/api/batches")
+    assert status == 200, status
+    count_before = len(listing["batches"])
+    broken = next(
+        (b for b in listing["batches"] if b["name"] == "LEGACY-BROKEN"), None
+    )
+    assert broken is not None, "legacy-seed 未写入 LEGACY-BROKEN"
+    ok = next(
+        (b for b in listing["batches"] if b["name"] == "LEGACY-QUALIFIED"), None
+    )
+    assert ok is not None, "legacy-seed 未写入 LEGACY-QUALIFIED"
+
+    # 非法旧记录无论作为当前记录还是参照 -> 422，原因可区分
+    for url in (
+        f"{WEB_BASE}/api/batches/{broken['id']}/compare/{ok['id']}",
+        f"{WEB_BASE}/api/batches/{ok['id']}/compare/{broken['id']}",
+    ):
+        status, body = request("GET", url)
+        assert status == 422, (status, body)
+        assert body["detail"]["reason"] == "series_invalid", body
+
+    # 任一记录不存在 -> 404，原因可区分
+    status, body = request("GET", f"{WEB_BASE}/api/batches/{ok['id']}/compare/999999")
+    assert status == 404, (status, body)
+    assert body["detail"]["reason"] == "batch_not_found", body
+    status, body = request("GET", f"{WEB_BASE}/api/batches/999999/compare/{ok['id']}")
+    assert status == 404, (status, body)
+    assert body["detail"]["reason"] == "batch_not_found", body
+
+    # 各类失败均不新增记录
+    status, after = request("GET", f"{WEB_BASE}/api/batches")
+    assert status == 200, status
+    assert len(after["batches"]) == count_before, "对比失败不应新增记录"
+
+    # 普通提交与历史复查不受影响
+    payload = {"name": "VERIFY-CMP-AFTER", "points": COMPARE_STANDARD}
+    status, created = request("POST", f"{WEB_BASE}/api/batches", payload)
+    assert status == 201, (status, created)
+    assert created["integral_display"] == "21000.0", created
+    assert created["verdict"] == "qualified", created
+    status, detail = request("GET", f"{WEB_BASE}/api/batches/{created['id']}")
+    assert status == 200, status
+    assert detail["points"] == payload["points"], detail
+    assert detail["verdict"] == "qualified", detail
+    # 合法旧记录参与对比正常：与等价新记录各节点差值为零
+    status, body = request(
+        "GET", f"{WEB_BASE}/api/batches/{created['id']}/compare/{ok['id']}"
+    )
+    assert status == 200, (status, body)
+    for node in body["nodes"]:
+        assert node["temperature_delta"] == 0, node
+        assert node["heatwork_delta"] == 0, node
 
 
 def main() -> int:

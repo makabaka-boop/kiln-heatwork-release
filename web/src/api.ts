@@ -3,6 +3,7 @@ import type {
   ApiFieldError,
   BatchDetail,
   BatchSummary,
+  CompareResult,
 } from "./types";
 
 const BASE = "/api";
@@ -18,13 +19,17 @@ export class SubmissionError extends Error {
 }
 
 async function parseError(response: Response): Promise<never> {
-  if (response.status === 422) {
-    const body = (await response.json()) as { detail: ApiErrorDetail };
-    throw new SubmissionError(body.detail);
-  }
   const body = (await response.json().catch(() => null)) as {
-    detail?: { message?: string } | string;
+    detail?: (Partial<ApiErrorDetail> & { reason?: string }) | string;
   } | null;
+  // 携带逐点定位错误的 422（提交/复算）按可定位错误抛出
+  if (
+    response.status === 422 &&
+    typeof body?.detail === "object" &&
+    Array.isArray(body.detail.errors)
+  ) {
+    throw new SubmissionError(body.detail as ApiErrorDetail);
+  }
   const message =
     typeof body?.detail === "string"
       ? body.detail
@@ -65,4 +70,14 @@ export async function recomputeBatch(id: number): Promise<BatchSummary> {
   });
   if (!response.ok) await parseError(response);
   return (await response.json()) as BatchSummary;
+}
+
+/** 对比两条窑次记录的升温轨迹与累计计热（只读，失败抛出携带原因的错误） */
+export async function compareBatches(
+  id: number,
+  referenceId: number,
+): Promise<CompareResult> {
+  const response = await fetch(`${BASE}/batches/${id}/compare/${referenceId}`);
+  if (!response.ok) await parseError(response);
+  return (await response.json()) as CompareResult;
 }

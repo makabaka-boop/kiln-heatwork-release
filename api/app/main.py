@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import db
+from .compare import build_curve, compare_curves
 from .heatwork import (
     VERDICT_LABELS,
     classify,
@@ -195,6 +196,130 @@ def get_batch(batch_id: int) -> Any:
     else:
         record["segments_note"] = None
     return _with_label(_attach_source(record))
+
+
+def _parse_stored_series(
+    stored_points: Any,
+) -> Tuple[Optional[List[Tuple[str, datetime, float]]], Optional[str]]:
+    """把已存采样点解析为 (原始时刻字符串, 时刻, 温度) 序列。
+
+    复用当前时刻解析约定：每点须为 JSON 对象、时刻可解析（naive 按 UTC）、
+    温度为有效数字、时刻严格递增。返回 (序列, None) 或 (None, 原因)。
+    对比接口据已存原始点求值，不回写、不改原结论。
+    """
+    if not isinstance(stored_points, list) or not stored_points:
+        return None, "已存采样点为空"
+    parsed: List[Tuple[str, datetime, float]] = []
+    for index, point in enumerate(stored_points):
+        if not isinstance(point, dict):
+            return None, f"第 {index} 个采样点不是 JSON 对象"
+        moment, error = parse_iso8601(point.get("time"))
+        if error is not None or moment is None:
+            return None, f"第 {index} 个采样点时刻无法解析（{error}）"
+        temperature = point.get("temperature")
+        if (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, (int, float))
+            or temperature != temperature  # NaN
+        ):
+            return None, f"第 {index} 个采样点温度不是有效数字"
+        parsed.append((point["time"], moment, temperature))
+    for index in range(1, len(parsed)):
+        if parsed[index][1] <= parsed[index - 1][1]:
+            return (
+                None,
+                f"已存采样点时刻未严格递增"
+                f"（第 {index} 个不晚于第 {index - 1} 个）",
+            )
+    return parsed, None
+
+
+def _compare_summary(record: Dict[str, Any]) -> Dict[str, Any]:
+    """对比响应中携带的单方窑次摘要（只读信息，不含采样点）。"""
+    return {
+        "id": record["id"],
+        "name": record["name"],
+        "point_count": record["point_count"],
+        "integral_display": record["integral_display"],
+        "verdict": record["verdict"],
+        "verdict_label": VERDICT_LABELS[record["verdict"]],
+        "created_at": record["created_at"],
+    }
+
+
+@app.get("/api/batches/{batch_id}/compare/{reference_id}")
+def compare_batches(batch_id: int, reference_id: int) -> Any:
+    """对比两条窑次记录的升温轨迹与累计计热（只读，不写库）。
+
+    两条曲线各自以首个采样时刻对齐经过 0 分钟，在共同持续区间内、
+    由双方采样时刻组成的并集时间轴上求值，返回对齐节点、温度差与
+    累计计热差（当前记录 − 参照记录）及双方摘要。任一记录不存在、
+    已存采样点无法形成合法时间序列、或两者没有正长度共同区间时，
+    按原因区分返回失败，均不改变任何已存数据。
+    """
+    current = db.get_batch(batch_id)
+    reference = db.get_batch(reference_id)
+    missing = []
+    if current is None:
+        missing.append(f"窑次 {batch_id}")
+    if reference is None:
+        missing.append(f"参照窑次 {reference_id}")
+    if missing:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": {
+                    "reason": "batch_not_found",
+                    "message": f"{'、'.join(missing)}不存在，无法对比。",
+                }
+            },
+        )
+
+    curves = {}
+    for record in (current, reference):
+        parsed, fragment = _parse_stored_series(record["points"])
+        if fragment is not None or parsed is None:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": {
+                        "reason": "series_invalid",
+                        "message": (
+                            f"窑次 {record['id']}「{record['name']}」"
+                            f"{fragment}，无法参与对比。"
+                        ),
+                    }
+                },
+            )
+        curves[record["id"]] = build_curve(
+            [(moment, temperature) for _, moment, temperature in parsed]
+        )
+
+    comparison = compare_curves(curves[current["id"]], curves[reference["id"]])
+    if comparison is None:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": {
+                    "reason": "no_common_interval",
+                    "message": "两条记录没有正长度的共同持续区间，无法对比。",
+                }
+            },
+        )
+
+    return {
+        "batch": _compare_summary(current),
+        "reference": _compare_summary(reference),
+        "common_minutes": float(comparison.common_minutes),
+        "nodes": [
+            {
+                "elapsed_minutes": float(node.elapsed_minutes),
+                "temperature_delta": float(node.temperature_delta),
+                "heatwork_delta": float(node.heatwork_delta),
+            }
+            for node in comparison.nodes
+        ],
+    }
 
 
 @app.post("/api/batches/{batch_id}/recompute", status_code=201)

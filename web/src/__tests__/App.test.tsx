@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
-import type { BatchDetail, BatchSummary } from "../types";
+import type { BatchDetail, BatchSummary, CompareResult } from "../types";
 
 function summary(id: number, name: string): BatchSummary {
   return {
@@ -156,8 +156,13 @@ describe("历史详情请求乱序", () => {
 
     await screen.findByTestId("batch-detail");
     expect(screen.getByTestId("detail-verdict")).toBeInTheDocument();
-    expect(screen.getByTestId("batch-detail")).toHaveTextContent("K-2");
-    expect(screen.getByTestId("batch-detail")).not.toHaveTextContent("K-1");
+    // 详情标题指向最后选择的 K-2（K-1 仅作为参照候选出现在下拉框中）
+    expect(
+      screen.getByRole("heading", { name: "窑次详情：K-2" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "窑次详情：K-1" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByTestId("detail-loading")).not.toBeInTheDocument();
   });
 });
@@ -371,5 +376,196 @@ describe("按当前规则复算", () => {
     expect(screen.getByTestId("batch-detail")).toBeInTheDocument();
     expect(screen.getByTestId("history-row-1")).toHaveClass("selected");
     expect(screen.queryByTestId("history-row-2")).not.toBeInTheDocument();
+  });
+});
+
+/** 对比结果：当前 K-1 对参照 K-2，含正/零差值节点 */
+function compareResult(batchId: number, referenceId: number): CompareResult {
+  const side = (id: number) => ({
+    id,
+    name: `K-${id}`,
+    point_count: 4,
+    integral_display: "21000.0",
+    verdict: "qualified" as const,
+    verdict_label: "合格",
+    created_at: "2026-09-11T13:00:00+00:00",
+  });
+  return {
+    batch: side(batchId),
+    reference: side(referenceId),
+    common_minutes: 300,
+    nodes: [
+      { elapsed_minutes: 0, temperature_delta: 0, heatwork_delta: 0 },
+      { elapsed_minutes: 30, temperature_delta: 25, heatwork_delta: 375 },
+      { elapsed_minutes: 60, temperature_delta: 50, heatwork_delta: 1500 },
+    ],
+  };
+}
+
+describe("轨迹对比", () => {
+  it("选择参照后请求对比并展示对齐节点与带符号差值", async () => {
+    mock.mockImplementation((url: string) => {
+      if (url === "/api/batches/1/compare/2") {
+        return Promise.resolve(jsonResponse(200, compareResult(1, 2)));
+      }
+      if (url === "/api/batches/1") {
+        return Promise.resolve(jsonResponse(200, detail(1, "K-1")));
+      }
+      if (url === "/api/batches") {
+        return Promise.resolve(
+          jsonResponse(200, { batches: [summary(1, "K-1"), summary(2, "K-2")] }),
+        );
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    render(<App />);
+    await screen.findByTestId("history-row-1");
+    fireEvent.click(screen.getByTestId("history-row-1"));
+    await screen.findByTestId("batch-detail");
+
+    // 参照候选排除当前窑次自身
+    const select = screen.getByTestId("compare-reference-select");
+    expect(select).not.toHaveTextContent("#1 K-1");
+    expect(select).toHaveTextContent("#2 K-2");
+
+    fireEvent.change(select, { target: { value: "2" } });
+
+    await screen.findByTestId("compare-table");
+    expect(screen.getByTestId("compare-summary")).toHaveTextContent(
+      "共同持续区间为 300 分钟",
+    );
+    expect(screen.getByTestId("compare-0-temperature-delta")).toHaveTextContent(
+      "0",
+    );
+    expect(screen.getByTestId("compare-1-temperature-delta")).toHaveTextContent(
+      "+25",
+    );
+    expect(screen.getByTestId("compare-1-heatwork-delta")).toHaveTextContent(
+      "+375",
+    );
+    expect(screen.getByTestId("compare-2-elapsed")).toHaveTextContent("60");
+    expect(screen.getByTestId("compare-2-heatwork-delta")).toHaveTextContent(
+      "+1500",
+    );
+  });
+
+  it("切换参照立即重算，迟到的旧响应不顶替新结果", async () => {
+    const d1 = deferred<Response>();
+    const d2 = deferred<Response>();
+    mock.mockImplementation((url: string) => {
+      if (url === "/api/batches/1/compare/2") return d1.promise;
+      if (url === "/api/batches/1/compare/3") return d2.promise;
+      if (url === "/api/batches/1") {
+        return Promise.resolve(jsonResponse(200, detail(1, "K-1")));
+      }
+      if (url === "/api/batches") {
+        return Promise.resolve(
+          jsonResponse(200, {
+            batches: [summary(1, "K-1"), summary(2, "K-2"), summary(3, "K-3")],
+          }),
+        );
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    render(<App />);
+    await screen.findByTestId("history-row-1");
+    fireEvent.click(screen.getByTestId("history-row-1"));
+    await screen.findByTestId("batch-detail");
+
+    const select = screen.getByTestId("compare-reference-select");
+    fireEvent.change(select, { target: { value: "2" } });
+    // 第一次对比仍在途时切换参照 -> 立即发起新请求
+    fireEvent.change(select, { target: { value: "3" } });
+    expect(screen.getByTestId("compare-loading")).toBeInTheDocument();
+
+    // 旧参照的响应最后才回来，不得顶替新结果
+    d2.resolve(jsonResponse(200, compareResult(1, 3)));
+    d1.resolve(jsonResponse(200, compareResult(1, 2)));
+
+    await screen.findByTestId("compare-table");
+    expect(screen.getByTestId("compare-summary")).toHaveTextContent("K-3");
+    expect(screen.getByTestId("compare-summary")).not.toHaveTextContent(
+      "参照 #2",
+    );
+    expect(screen.queryByTestId("compare-loading")).not.toBeInTheDocument();
+  });
+
+  it("对比失败：保留当前详情与已选参照，就地提示且不新增记录", async () => {
+    mock.mockImplementation((url: string) => {
+      if (url === "/api/batches/1/compare/2") {
+        return Promise.resolve(
+          jsonResponse(422, {
+            detail: {
+              reason: "series_invalid",
+              message:
+                "窑次 2「K-2」第 0 个采样点时刻无法解析（时刻必须为 ISO 8601 字符串），无法参与对比。",
+            },
+          }),
+        );
+      }
+      if (url === "/api/batches/1") {
+        return Promise.resolve(jsonResponse(200, detail(1, "K-1")));
+      }
+      if (url === "/api/batches") {
+        return Promise.resolve(
+          jsonResponse(200, { batches: [summary(1, "K-1"), summary(2, "K-2")] }),
+        );
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    render(<App />);
+    await screen.findByTestId("history-row-1");
+    fireEvent.click(screen.getByTestId("history-row-1"));
+    await screen.findByTestId("batch-detail");
+
+    fireEvent.change(screen.getByTestId("compare-reference-select"), {
+      target: { value: "2" },
+    });
+
+    await screen.findByTestId("compare-error");
+    expect(screen.getByTestId("compare-error")).toHaveTextContent(
+      "无法参与对比",
+    );
+    // 当前详情、已选参照与历史选择都保留，不出现对比表
+    expect(screen.getByTestId("batch-detail")).toBeInTheDocument();
+    expect(screen.getByTestId("compare-reference-select")).toHaveValue("2");
+    expect(screen.getByTestId("history-row-1")).toHaveClass("selected");
+    expect(screen.queryByTestId("compare-table")).not.toBeInTheDocument();
+    // 复算入口不受对比失败影响，仍可使用
+    expect(screen.getByTestId("recompute-button")).toBeEnabled();
+  });
+
+  it("切换到其他窑次详情后，对比选择与结果随之重置", async () => {
+    mock.mockImplementation((url: string) => {
+      if (url === "/api/batches/1/compare/2") {
+        return Promise.resolve(jsonResponse(200, compareResult(1, 2)));
+      }
+      if (url === "/api/batches/1") {
+        return Promise.resolve(jsonResponse(200, detail(1, "K-1")));
+      }
+      if (url === "/api/batches/2") {
+        return Promise.resolve(jsonResponse(200, detail(2, "K-2")));
+      }
+      if (url === "/api/batches") {
+        return Promise.resolve(
+          jsonResponse(200, { batches: [summary(1, "K-1"), summary(2, "K-2")] }),
+        );
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    render(<App />);
+    await screen.findByTestId("history-row-1");
+    fireEvent.click(screen.getByTestId("history-row-1"));
+    await screen.findByTestId("batch-detail");
+    fireEvent.change(screen.getByTestId("compare-reference-select"), {
+      target: { value: "2" },
+    });
+    await screen.findByTestId("compare-table");
+
+    fireEvent.click(screen.getByTestId("history-row-2"));
+    await screen.findByText("窑次详情：K-2");
+    // 新详情不再展示旧参照与旧对比结果
+    expect(screen.getByTestId("compare-reference-select")).toHaveValue("");
+    expect(screen.queryByTestId("compare-table")).not.toBeInTheDocument();
   });
 });

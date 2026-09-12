@@ -1,5 +1,6 @@
-import type { BatchDetail } from "../types";
+import type { BatchDetail, BatchSummary, CompareResult } from "../types";
 import { verdictMeta } from "../verdict";
+import { ComparePanel } from "./ComparePanel";
 import { SegmentsTable } from "./SegmentsTable";
 
 interface Props {
@@ -9,6 +10,18 @@ interface Props {
   /** 复算失败的原因提示；为 null 时不展示 */
   recomputeError: string | null;
   onRecompute: (id: number) => void;
+  /** 历史记录（轨迹对比的参照候选来源） */
+  batches: BatchSummary[];
+  /** 已选参照窑次 id；未选择为 null */
+  referenceId: number | null;
+  /** 对比结果；未选择或请求失败时为 null */
+  compare: CompareResult | null;
+  /** 对比失败的原因提示；为 null 时不展示 */
+  compareError: string | null;
+  /** 对比请求进行中 */
+  compareLoading: boolean;
+  /** 切换参照窑次：立即重新对比 */
+  onSelectReference: (referenceId: number | null) => void;
 }
 
 export function BatchDetailView({
@@ -16,6 +29,12 @@ export function BatchDetailView({
   recomputing,
   recomputeError,
   onRecompute,
+  batches,
+  referenceId,
+  compare,
+  compareError,
+  compareLoading,
+  onSelectReference,
 }: Props) {
   const meta = verdictMeta(detail.verdict);
   return (
@@ -66,6 +85,15 @@ export function BatchDetailView({
           </em>
         )}
       </div>
+      <ComparePanel
+        currentId={detail.id}
+        batches={batches}
+        referenceId={referenceId}
+        result={compare}
+        error={compareError}
+        loading={compareLoading}
+        onSelectReference={onSelectReference}
+      />
       <h3 className="segments-title">分段计热明细</h3>
       <div data-testid="detail-segments">
         <SegmentsTable segments={detail.segments} note={detail.segments_note} />

@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchBatch, fetchBatches, recomputeBatch } from "./api";
+import { compareBatches, fetchBatch, fetchBatches, recomputeBatch } from "./api";
 import { BatchDetailView } from "./components/BatchDetail";
 import { BatchForm } from "./components/BatchForm";
 import { HistoryList } from "./components/HistoryList";
 import { ResultBanner } from "./components/ResultBanner";
-import type { BatchDetail, BatchSummary } from "./types";
+import type { BatchDetail, BatchSummary, CompareResult } from "./types";
 
 export default function App() {
   const [batches, setBatches] = useState<BatchSummary[]>([]);
@@ -17,8 +17,14 @@ export default function App() {
   const [detailError, setDetailError] = useState<string | null>(null);
   const [recomputing, setRecomputing] = useState(false);
   const [recomputeError, setRecomputeError] = useState<string | null>(null);
+  const [referenceId, setReferenceId] = useState<number | null>(null);
+  const [compare, setCompare] = useState<CompareResult | null>(null);
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareError, setCompareError] = useState<string | null>(null);
   /** 单调递增的详情请求序号，只接受最后一次选择的响应，杜绝乱序覆盖 */
   const detailRequestSeq = useRef(0);
+  /** 对比请求序号：切换参照时作废旧请求，只接受最近一次的结果 */
+  const compareRequestSeq = useRef(0);
 
   const refresh = useCallback(async () => {
     try {
@@ -33,6 +39,15 @@ export default function App() {
     void refresh();
   }, [refresh]);
 
+  /** 轨迹对比状态随详情一起作废：新详情不再展示旧参照与旧结果 */
+  const resetCompare = () => {
+    compareRequestSeq.current += 1;
+    setReferenceId(null);
+    setCompare(null);
+    setCompareError(null);
+    setCompareLoading(false);
+  };
+
   const handleCreated = (batch: BatchSummary) => {
     setLastCreated(batch);
     // 新窑次提交后，旧详情与其在途请求全部作废
@@ -42,6 +57,7 @@ export default function App() {
     setDetailLoading(false);
     setDetailError(null);
     setRecomputeError(null);
+    resetCompare();
     void refresh();
   };
 
@@ -58,6 +74,7 @@ export default function App() {
     setDetail(null);
     setDetailError(null);
     setRecomputeError(null);
+    resetCompare();
     setDetailLoading(true);
     try {
       const next = await fetchBatch(id);
@@ -87,6 +104,33 @@ export default function App() {
       setRecomputeError(error instanceof Error ? error.message : "复算失败");
     } finally {
       setRecomputing(false);
+    }
+  };
+
+  /**
+   * 选择/切换参照窑次：立即请求两条记录的对比结果。
+   * 失败时保留当前详情与已选参照，仅在对比区域就地提示。
+   */
+  const handleSelectReference = async (nextReferenceId: number | null) => {
+    const seq = compareRequestSeq.current + 1;
+    compareRequestSeq.current = seq;
+    setReferenceId(nextReferenceId);
+    setCompare(null);
+    setCompareError(null);
+    if (nextReferenceId === null || detail === null) {
+      setCompareLoading(false);
+      return;
+    }
+    setCompareLoading(true);
+    try {
+      const result = await compareBatches(detail.id, nextReferenceId);
+      if (compareRequestSeq.current !== seq) return; // 已被更新的参照取代
+      setCompare(result);
+    } catch (error) {
+      if (compareRequestSeq.current !== seq) return;
+      setCompareError(error instanceof Error ? error.message : "对比失败");
+    } finally {
+      if (compareRequestSeq.current === seq) setCompareLoading(false);
     }
   };
 
@@ -131,6 +175,12 @@ export default function App() {
               recomputing={recomputing}
               recomputeError={recomputeError}
               onRecompute={(id) => void handleRecompute(id)}
+              batches={batches}
+              referenceId={referenceId}
+              compare={compare}
+              compareError={compareError}
+              compareLoading={compareLoading}
+              onSelectReference={(id) => void handleSelectReference(id)}
             />
           )}
         </div>
