@@ -58,6 +58,22 @@ DEVIATED_CURVE = [
     (at(300), 600.0),
 ]
 
+# 含小数温度的等价轨迹：600 -> 603.6（30 min）-> 603.6（60 min），
+# 分别按 30 min 与 10 min 采样，加密点十进制取值都落在同一折线上
+DECIMAL_COARSE_CURVE = [
+    (at(0), 600.0),
+    (at(30), 603.6),
+    (at(90), 603.6),
+]
+DECIMAL_DENSE_CURVE = [
+    (at(0), 600.0),
+    (at(10), 601.2),
+    (at(20), 602.4),
+    (at(30), 603.6),
+    (at(60), 603.6),
+    (at(90), 603.6),
+]
+
 
 class TestCurve:
     def test_elapsed_minutes_aligned_to_first_sample(self):
@@ -102,6 +118,21 @@ class TestCompareCurves:
         # 时间轴为双方采样时刻的并集（加密曲线的 11 个节点）
         assert [float(node.elapsed_minutes) for node in comparison.nodes] == [
             0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300
+        ]
+        for node in comparison.nodes:
+            assert node.temperature_delta == 0
+            assert node.heatwork_delta == 0
+
+    def test_decimal_temperatures_equivalent_trajectories_give_zero_deltas(self):
+        # 含小数温度的等价轨迹：中间对齐节点的差值必须严格为零，
+        # 不允许浮点二进制展开带来微小非零差值
+        comparison = compare_curves(
+            build_curve(DECIMAL_COARSE_CURVE), build_curve(DECIMAL_DENSE_CURVE)
+        )
+        assert comparison is not None
+        assert comparison.common_minutes == 90
+        assert [float(node.elapsed_minutes) for node in comparison.nodes] == [
+            0, 10, 20, 30, 60, 90
         ]
         for node in comparison.nodes:
             assert node.temperature_delta == 0
@@ -178,6 +209,21 @@ DEVIATED_PAYLOAD = [
     {"time": "2026-09-11T10:00:00Z", "temperature": 700},
     {"time": "2026-09-11T12:00:00Z", "temperature": 700},
     {"time": "2026-09-11T13:00:00Z", "temperature": 600},
+]
+
+# 含小数温度的等价轨迹（30 min 与 10 min 两种采样频率）
+DECIMAL_COARSE_PAYLOAD = [
+    {"time": "2026-09-11T08:00:00Z", "temperature": 600.0},
+    {"time": "2026-09-11T08:30:00Z", "temperature": 603.6},
+    {"time": "2026-09-11T09:30:00Z", "temperature": 603.6},
+]
+DECIMAL_DENSE_PAYLOAD = [
+    {"time": "2026-09-11T08:00:00Z", "temperature": 600.0},
+    {"time": "2026-09-11T08:10:00Z", "temperature": 601.2},
+    {"time": "2026-09-11T08:20:00Z", "temperature": 602.4},
+    {"time": "2026-09-11T08:30:00Z", "temperature": 603.6},
+    {"time": "2026-09-11T08:50:00Z", "temperature": 603.6},
+    {"time": "2026-09-11T09:30:00Z", "temperature": 603.6},
 ]
 
 
@@ -265,6 +311,75 @@ class TestCompareEndpoint:
         # 既有创建/列表/详情响应不受对比影响
         assert client.get("/api/batches").json() == list_before
         assert client.get(f"/api/batches/{current['id']}").json() == detail_before
+
+    def test_decimal_temperatures_all_zero_deltas(self, client):
+        # 含小数温度的等价轨迹经接口对比：各节点差值严格为零
+        current = create(client, "K-dec-coarse", DECIMAL_COARSE_PAYLOAD)
+        reference = create(client, "K-dec-dense", DECIMAL_DENSE_PAYLOAD)
+
+        response = client.get(f"/api/batches/{current['id']}/compare/{reference['id']}")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["common_minutes"] == 90
+        assert [node["elapsed_minutes"] for node in body["nodes"]] == [
+            0, 10, 20, 30, 50, 90
+        ]
+        for node in body["nodes"]:
+            assert node["temperature_delta"] == 0
+            assert node["heatwork_delta"] == 0
+
+
+class TestCompareQueryEntry:
+    """约定查询式入口：GET /api/batches/{id}/compare?reference_id=..."""
+
+    def test_query_entry_returns_common_interval_and_nodes(self, client):
+        current = create(client, "K-std", STANDARD_PAYLOAD)
+        reference = create(client, "K-dense", DENSE_PAYLOAD)
+
+        response = client.get(
+            f"/api/batches/{current['id']}/compare",
+            params={"reference_id": reference["id"]},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        # 与路径式入口结果完全一致：共同区间、逐节点差值与双方摘要
+        path_body = client.get(
+            f"/api/batches/{current['id']}/compare/{reference['id']}"
+        ).json()
+        assert body == path_body
+        assert body["common_minutes"] == 300
+        assert body["batch"]["id"] == current["id"]
+        assert body["reference"]["id"] == reference["id"]
+        for node in body["nodes"]:
+            assert node["temperature_delta"] == 0
+            assert node["heatwork_delta"] == 0
+
+    def test_query_entry_missing_record_returns_404_reason(self, client):
+        current = create(client, "K-std", STANDARD_PAYLOAD)
+        response = client.get(
+            f"/api/batches/{current['id']}/compare", params={"reference_id": 999}
+        )
+        assert response.status_code == 404
+        assert response.json()["detail"]["reason"] == "batch_not_found"
+
+        response = client.get(
+            "/api/batches/999/compare", params={"reference_id": current["id"]}
+        )
+        assert response.status_code == 404
+        assert response.json()["detail"]["reason"] == "batch_not_found"
+
+    def test_query_entry_decimal_temperatures_zero_deltas(self, client):
+        current = create(client, "K-dec-coarse", DECIMAL_COARSE_PAYLOAD)
+        reference = create(client, "K-dec-dense", DECIMAL_DENSE_PAYLOAD)
+
+        response = client.get(
+            f"/api/batches/{current['id']}/compare",
+            params={"reference_id": reference["id"]},
+        )
+        assert response.status_code == 200
+        for node in response.json()["nodes"]:
+            assert node["temperature_delta"] == 0
+            assert node["heatwork_delta"] == 0
 
 
 # 升级前旧表结构（无 segments_json 等后增列）

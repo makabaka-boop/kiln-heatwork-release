@@ -247,6 +247,16 @@ def _compare_summary(record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+@app.get("/api/batches/{batch_id}/compare")
+def compare_batches_by_query(batch_id: int, reference_id: int) -> Any:
+    """约定查询式入口：参照窑次以查询参数 ``reference_id`` 给出。
+
+    与路径式 ``/api/batches/{id}/compare/{reference_id}`` 完全等价，
+    返回同样的对齐节点、两类差值与双方摘要，失败原因区分一致。
+    """
+    return compare_batches(batch_id, reference_id)
+
+
 @app.get("/api/batches/{batch_id}/compare/{reference_id}")
 def compare_batches(batch_id: int, reference_id: int) -> Any:
     """对比两条窑次记录的升温轨迹与累计计热（只读，不写库）。

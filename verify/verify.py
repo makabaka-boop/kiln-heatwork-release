@@ -602,6 +602,22 @@ COMPARE_DEVIATED_MOMENTS = [
     (datetime(2026, 9, 11, 13, 0, tzinfo=timezone.utc), 600.0),
 ]
 
+# 含小数温度的等价轨迹：600 -> 603.6（30 min）-> 603.6（60 min），
+# 分别按 30 min 与 10 min 采样，加密点十进制取值都落在同一折线上
+COMPARE_DECIMAL_COARSE = [
+    {"time": "2026-09-11T08:00:00Z", "temperature": 600.0},
+    {"time": "2026-09-11T08:30:00Z", "temperature": 603.6},
+    {"time": "2026-09-11T09:30:00Z", "temperature": 603.6},
+]
+COMPARE_DECIMAL_DENSE = [
+    {"time": "2026-09-11T08:00:00Z", "temperature": 600.0},
+    {"time": "2026-09-11T08:10:00Z", "temperature": 601.2},
+    {"time": "2026-09-11T08:20:00Z", "temperature": 602.4},
+    {"time": "2026-09-11T08:30:00Z", "temperature": 603.6},
+    {"time": "2026-09-11T08:50:00Z", "temperature": 603.6},
+    {"time": "2026-09-11T09:30:00Z", "temperature": 603.6},
+]
+
 
 def assert_compare_nodes_match(body: dict, current_moments, reference_moments):
     """响应中的对齐节点与独立复算逐一一致，返回 {经过分钟: 节点}。"""
@@ -650,6 +666,49 @@ def _():
     # 对比为只读：记录数不变
     status, after = request("GET", f"{WEB_BASE}/api/batches")
     assert len(after["batches"]) == count_before, "对比不应新增记录"
+
+
+@check("对比：查询式入口返回共同区间与逐节点差值，含小数温度等价轨迹严格零差值")
+def _():
+    status, current = request(
+        "POST", f"{WEB_BASE}/api/batches", {"name": "VERIFY-CMP-DEC-COARSE", "points": COMPARE_DECIMAL_COARSE}
+    )
+    assert status == 201, (status, current)
+    status, reference = request(
+        "POST", f"{WEB_BASE}/api/batches", {"name": "VERIFY-CMP-DEC-DENSE", "points": COMPARE_DECIMAL_DENSE}
+    )
+    assert status == 201, (status, reference)
+
+    # 约定查询式入口：/api/batches/{id}/compare?reference_id=...
+    status, body = request(
+        "GET",
+        f"{WEB_BASE}/api/batches/{current['id']}/compare?reference_id={reference['id']}",
+    )
+    assert status == 200, (status, body)
+    assert set(body) == {"batch", "reference", "common_minutes", "nodes"}, body
+    assert body["batch"]["id"] == current["id"], body
+    assert body["reference"]["id"] == reference["id"], body
+    # 共同区间与并集时间轴
+    assert body["common_minutes"] == 90, body
+    assert [node["elapsed_minutes"] for node in body["nodes"]] == [0, 10, 20, 30, 50, 90], body
+    # 含小数温度的等价轨迹：全部节点差值严格为零
+    for node in body["nodes"]:
+        assert node["temperature_delta"] == 0, node
+        assert node["heatwork_delta"] == 0, node
+
+    # 与路径式入口结果完全一致
+    status, path_body = request(
+        "GET", f"{WEB_BASE}/api/batches/{current['id']}/compare/{reference['id']}"
+    )
+    assert status == 200, (status, path_body)
+    assert body == path_body, (body, path_body)
+
+    # 查询式入口的失败原因区分与路径式一致
+    status, missing = request(
+        "GET", f"{WEB_BASE}/api/batches/{current['id']}/compare?reference_id=999999"
+    )
+    assert status == 404, (status, missing)
+    assert missing["detail"]["reason"] == "batch_not_found", missing
 
 
 @check("对比：局部升温偏差经插值后的符号与数值")

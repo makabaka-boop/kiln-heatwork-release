@@ -186,6 +186,7 @@ docker compose --profile verify up --build --exit-code-from verify --abort-on-co
 | GET | `/api/batches/{id}` | 详情，含原始采样点、未舍入积分与分段明细 |
 | POST | `/api/batches/{id}/recompute` | 按当前规则复算该窑次；201 返回新窑次与来源摘要，404/422 区分失败原因 |
 | GET | `/api/batches/{id}/compare/{reference_id}` | 与参照窑次对比升温轨迹与累计计热（只读）；200 返回对齐节点、两类差值与双方摘要，404/422 区分失败原因 |
+| GET | `/api/batches/{id}/compare?reference_id={reference_id}` | 上一条的约定查询式入口，参照窑次改由查询参数给出；响应与失败原因完全一致 |
 
 提交体：
 
@@ -243,10 +244,10 @@ docker compose --profile verify up --build --exit-code-from verify --abort-on-co
 ## 测试
 
 ```bash
-# 后端：积分边界、分段明细、校验、API 落库、复算、轨迹对比、旧库升级兼容（83 例）
+# 后端：积分边界、分段明细、校验、API 落库、复算、轨迹对比、旧库升级兼容（88 例）
 cd api && pip install -r requirements-dev.txt && pytest
 
-# 前端：错误映射、结论展示、分段明细表、表单交互、复算流程、轨迹对比（32 例）
+# 前端：错误映射、结论展示、分段明细表、表单交互、复算流程、轨迹对比（33 例）
 cd web && npm ci && npm test
 
 # 真实联调：浏览器 -> web -> api -> SQLite（5 例）

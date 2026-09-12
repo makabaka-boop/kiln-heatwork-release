@@ -92,15 +92,20 @@ export default function App() {
   /**
    * 按当前规则复算：成功则刷新列表并打开新窑次详情（展示来源关系）；
    * 失败则停留在原详情，仅显示原因提示，不新增记录也不清除当前选择。
+   * 复算在途期间用户改选其他窑次的，迟到的结果不强制跳转：
+   * 新记录照常入列，页面保持最后选择的窑次详情。
    */
   const handleRecompute = async (id: number) => {
+    const seqAtStart = detailRequestSeq.current;
     setRecomputing(true);
     setRecomputeError(null);
     try {
       const created = await recomputeBatch(id);
       await refresh();
+      if (detailRequestSeq.current !== seqAtStart) return; // 已改选其他窑次
       void handleSelect(created.id);
     } catch (error) {
+      if (detailRequestSeq.current !== seqAtStart) return; // 已改选其他窑次
       setRecomputeError(error instanceof Error ? error.message : "复算失败");
     } finally {
       setRecomputing(false);

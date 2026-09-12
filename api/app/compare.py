@@ -25,6 +25,18 @@ Number = Union[int, float]
 TimedSample = Tuple[datetime, Number]
 
 
+def _exact_temperature(value: Number) -> Fraction:
+    """把采样温度转换为精确有理数。
+
+    浮点温度按其**十进制表示**转换（如 601.2 -> 3006/5），而不是二进制
+    浮点的精确展开。否则两条采样频率不同、但十进制取值落在同一折线上
+    的等价轨迹，会在中间对齐节点上产生微小非零差值。
+    """
+    if isinstance(value, float):
+        return Fraction(str(value))
+    return Fraction(value)
+
+
 @dataclass(frozen=True)
 class Curve:
     """以首个采样时刻为经过 0 分钟的温度折线及其累计计热。
@@ -49,7 +61,7 @@ def build_curve(points: Sequence[TimedSample]) -> Curve:
         raise ValueError("构建曲线至少需要 1 个采样点")
     first = points[0][0]
     elapsed = tuple(_minutes(moment - first) for moment, _ in points)
-    temperatures = tuple(Fraction(temperature) for _, temperature in points)
+    temperatures = tuple(_exact_temperature(temperature) for _, temperature in points)
     base = Fraction(HEATWORK_BASE_C)
     total = Fraction(0)
     prefix: List[Fraction] = [total]

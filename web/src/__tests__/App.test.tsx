@@ -377,6 +377,69 @@ describe("按当前规则复算", () => {
     expect(screen.getByTestId("history-row-1")).toHaveClass("selected");
     expect(screen.queryByTestId("history-row-2")).not.toBeInTheDocument();
   });
+
+  it("复算在途期间切换到其他窑次，迟到的复算结果不强制跳转", async () => {
+    const recomputed = {
+      ...summary(3, "K-1"),
+      source_batch_id: 1,
+      source_name: "K-1",
+      recomputed_at: "2026-09-12T01:00:00+00:00",
+      source: {
+        id: 1,
+        name: "K-1",
+        integral_display: "21000.0",
+        verdict: "qualified" as const,
+        verdict_label: "合格",
+        created_at: "2026-09-11T13:00:00+00:00",
+      },
+    };
+    const dRecompute = deferred<Response>();
+    let done = false;
+    mock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/api/batches/1/recompute" && init?.method === "POST") {
+        return dRecompute.promise;
+      }
+      if (url === "/api/batches/1") {
+        return Promise.resolve(jsonResponse(200, detail(1, "K-1")));
+      }
+      if (url === "/api/batches/2") {
+        return Promise.resolve(jsonResponse(200, detail(2, "K-2")));
+      }
+      if (url === "/api/batches/3") {
+        return Promise.resolve(jsonResponse(200, { ...recomputed, points: [] }));
+      }
+      if (url === "/api/batches") {
+        return Promise.resolve(
+          jsonResponse(200, {
+            batches: done
+              ? [recomputed, summary(2, "K-2"), summary(1, "K-1")]
+              : [summary(2, "K-2"), summary(1, "K-1")],
+          }),
+        );
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    render(<App />);
+    await screen.findByTestId("history-row-1");
+    fireEvent.click(screen.getByTestId("history-row-1"));
+    await screen.findByText("窑次详情：K-1");
+
+    fireEvent.click(screen.getByTestId("recompute-button"));
+    // 复算仍在途：切换到另一历史窑次
+    fireEvent.click(screen.getByTestId("history-row-2"));
+    await screen.findByText("窑次详情：K-2");
+
+    // 迟到的复算结果：新记录照常入列，但页面保持最后选择的 K-2 详情
+    done = true;
+    dRecompute.resolve(jsonResponse(201, recomputed));
+    await screen.findByTestId("history-row-3");
+    expect(
+      screen.getByRole("heading", { name: "窑次详情：K-2" }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("history-row-2")).toHaveClass("selected");
+    expect(screen.getByTestId("history-row-3")).not.toHaveClass("selected");
+    expect(screen.queryByTestId("detail-source")).not.toBeInTheDocument();
+  });
 });
 
 /** 对比结果：当前 K-1 对参照 K-2，含正/零差值节点 */
