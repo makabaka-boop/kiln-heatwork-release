@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from fractions import Fraction
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -41,6 +41,29 @@ app.add_middleware(
 def _with_label(record: Dict[str, Any]) -> Dict[str, Any]:
     record = dict(record)
     record["verdict_label"] = VERDICT_LABELS[record["verdict"]]
+    return record
+
+
+def _source_summary(source: Dict[str, Any]) -> Dict[str, Any]:
+    """复算记录响应中携带的来源窑次摘要（只读信息，不含采样点）。"""
+    return {
+        "id": source["id"],
+        "name": source["name"],
+        "integral_display": source["integral_display"],
+        "verdict": source["verdict"],
+        "verdict_label": VERDICT_LABELS[source["verdict"]],
+        "created_at": source["created_at"],
+    }
+
+
+def _attach_source(record: Dict[str, Any]) -> Dict[str, Any]:
+    """为复算记录附上来源窑次摘要；普通提交与旧记录为 None。"""
+    source_id = record.get("source_batch_id")
+    if source_id is None:
+        record["source"] = None
+        return record
+    source = db.get_batch(source_id)
+    record["source"] = _source_summary(source) if source is not None else None
     return record
 
 
@@ -147,6 +170,7 @@ def create_batch(payload: Dict[str, Any] = Body(...)) -> Any:
         segments=segments,
     )
     record["segments_note"] = None
+    record["source"] = None
     return _with_label(record)
 
 
@@ -170,4 +194,66 @@ def get_batch(batch_id: int) -> Any:
         record["segments_note"] = note
     else:
         record["segments_note"] = None
+    return _with_label(_attach_source(record))
+
+
+@app.post("/api/batches/{batch_id}/recompute", status_code=201)
+def recompute_batch(batch_id: int) -> Any:
+    """按当前规则复算历史窑次。
+
+    读取来源记录的原始采样点，走与正常提交一致的校验、线性插值、
+    分段贡献与判定链路，结果以**新窑次**落库并记录来源窑次编号与
+    复算时间；原记录保持只读。来源不存在或其原始点已无法通过当前
+    校验时，返回区分原因的失败响应且不新增记录。
+    """
+    source = db.get_batch(batch_id)
+    if source is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": {
+                    "reason": "source_not_found",
+                    "message": f"来源窑次 {batch_id} 不存在，无法复算。",
+                }
+            },
+        )
+
+    normalized, errors = validate_submission(
+        {"name": source["name"], "points": source["points"]}
+    )
+    if errors:
+        # 原始点已无法通过当前校验：不新增记录，返回全部可定位错误
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": {
+                    "reason": "source_invalid",
+                    "message": "该记录的原始采样点未通过当前校验，无法复算，未新增记录。",
+                    "errors": [error.to_dict() for error in errors],
+                }
+            },
+        )
+
+    assert normalized is not None
+    segments, integral_raw = _build_segments(
+        [(p.time_raw, p.moment, p.temperature) for p in normalized.points]
+    )
+    display = round_half_up_1(integral_raw)
+    verdict = classify(display)
+
+    record = db.insert_batch(
+        name=normalized.name,
+        points=[
+            {"time": p.time_raw, "temperature": p.temperature}
+            for p in normalized.points
+        ],
+        integral_raw=float(integral_raw),
+        integral_display=str(display),
+        verdict=verdict,
+        segments=segments,
+        source_batch_id=source["id"],
+        recomputed_at=datetime.now(timezone.utc).isoformat(),
+    )
+    record["segments_note"] = None
+    record["source"] = _source_summary(source)
     return _with_label(record)

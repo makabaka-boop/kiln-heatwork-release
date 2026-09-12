@@ -258,3 +258,118 @@ describe("切换中的加载态", () => {
     await screen.findByText("窑次详情：K-2");
   });
 });
+
+/** 复算生成的新窑次（id=2，来源为 id=1 的 K-1） */
+function recomputedSummary(): BatchSummary {
+  return {
+    ...summary(2, "K-1"),
+    source_batch_id: 1,
+    source_name: "K-1",
+    recomputed_at: "2026-09-12T01:00:00+00:00",
+    source: {
+      id: 1,
+      name: "K-1",
+      integral_display: "21000.0",
+      verdict: "qualified",
+      verdict_label: "合格",
+      created_at: "2026-09-11T13:00:00+00:00",
+    },
+  };
+}
+
+function recomputedDetail(): BatchDetail {
+  return { ...recomputedSummary(), points: [] };
+}
+
+describe("按当前规则复算", () => {
+  it("复算成功：生成新记录，详情展示来源关系，历史列表标识复算自某窑次", async () => {
+    let recomputed = false;
+    mock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/api/batches/1/recompute" && init?.method === "POST") {
+        recomputed = true;
+        return Promise.resolve(jsonResponse(201, recomputedSummary()));
+      }
+      if (url === "/api/batches/2") {
+        return Promise.resolve(jsonResponse(200, recomputedDetail()));
+      }
+      if (url === "/api/batches/1") {
+        return Promise.resolve(jsonResponse(200, detail(1, "K-1")));
+      }
+      if (url === "/api/batches") {
+        return Promise.resolve(
+          jsonResponse(200, {
+            batches: recomputed
+              ? [recomputedSummary(), summary(1, "K-1")]
+              : [summary(1, "K-1")],
+          }),
+        );
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    render(<App />);
+    await screen.findByTestId("history-row-1");
+    fireEvent.click(screen.getByTestId("history-row-1"));
+    await screen.findByTestId("batch-detail");
+
+    fireEvent.click(screen.getByTestId("recompute-button"));
+
+    // 新窑次详情打开，展示「复算自某窑次」与复算时间
+    await screen.findByTestId("detail-source");
+    expect(screen.getByTestId("detail-source")).toHaveTextContent(
+      "复算自窑次 #1",
+    );
+    expect(screen.getByTestId("detail-recomputed-at")).toBeInTheDocument();
+    // 历史列表新增一行并标识来源，新行被选中
+    expect(screen.getByTestId("history-row-2")).toHaveClass("selected");
+    expect(screen.getByTestId("history-source-2")).toHaveTextContent(
+      "复算自 K-1",
+    );
+  });
+
+  it("复算失败：停留在原详情并显示提示，不清除当前选择", async () => {
+    mock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === "/api/batches/1/recompute" && init?.method === "POST") {
+        return Promise.resolve(
+          jsonResponse(422, {
+            detail: {
+              reason: "source_invalid",
+              message:
+                "该记录的原始采样点未通过当前校验，无法复算，未新增记录。",
+              errors: [
+                {
+                  index: 0,
+                  field: "time",
+                  message: "时刻必须为 ISO 8601 字符串",
+                },
+              ],
+            },
+          }),
+        );
+      }
+      if (url === "/api/batches/1") {
+        return Promise.resolve(jsonResponse(200, detail(1, "K-1")));
+      }
+      if (url === "/api/batches") {
+        return Promise.resolve(
+          jsonResponse(200, { batches: [summary(1, "K-1")] }),
+        );
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    render(<App />);
+    await screen.findByTestId("history-row-1");
+    fireEvent.click(screen.getByTestId("history-row-1"));
+    await screen.findByTestId("batch-detail");
+
+    fireEvent.click(screen.getByTestId("recompute-button"));
+
+    await screen.findByTestId("recompute-error");
+    expect(screen.getByTestId("recompute-error")).toHaveTextContent(
+      "未通过当前校验",
+    );
+    // 原详情与当前选择保持不变，历史列表不新增行
+    expect(screen.getByTestId("batch-detail")).toBeInTheDocument();
+    expect(screen.getByTestId("history-row-1")).toHaveClass("selected");
+    expect(screen.queryByTestId("history-row-2")).not.toBeInTheDocument();
+  });
+});

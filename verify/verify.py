@@ -163,6 +163,8 @@ def _():
     assert body["integral_display"] == expected_display, body
     assert body["verdict"] == independent_verdict(expected_display) == "qualified", body
     assert body["verdict_label"] == "合格", body
+    # 普通提交：无来源标记，响应字段保持兼容
+    assert body["source_batch_id"] is None and body["source"] is None, body
 
     # 刷新后仍可复查：列表与详情（原始点逐字保留）
     status, listing = request("GET", f"{WEB_BASE}/api/batches")
@@ -371,6 +373,129 @@ def _():
     assert detail["segments"] is None, detail
     assert isinstance(detail["segments_note"], str), detail
     assert "无法" in detail["segments_note"], detail["segments_note"]
+
+
+# ---------- 按当前规则复算 ----------
+
+RECOMPUTE_CURVE = [
+    {"time": "2026-09-11T08:00:00Z", "temperature": 600},
+    {"time": "2026-09-11T10:00:00Z", "temperature": 700},
+    {"time": "2026-09-11T12:00:00Z", "temperature": 700},
+    {"time": "2026-09-11T13:00:00Z", "temperature": 600},
+]
+RECOMPUTE_MOMENTS = [
+    (datetime(2026, 9, 11, 8, tzinfo=timezone.utc), 600.0),
+    (datetime(2026, 9, 11, 10, tzinfo=timezone.utc), 700.0),
+    (datetime(2026, 9, 11, 12, tzinfo=timezone.utc), 700.0),
+    (datetime(2026, 9, 11, 13, tzinfo=timezone.utc), 600.0),
+]
+
+
+@check("复算：合法历史记录按当前规则重算，新记录落库并标注来源")
+def _():
+    payload = {"name": "VERIFY-RECOMPUTE-SRC", "points": RECOMPUTE_CURVE}
+    status, source = request("POST", f"{WEB_BASE}/api/batches", payload)
+    assert status == 201, (status, source)
+
+    status, before = request("GET", f"{WEB_BASE}/api/batches")
+    assert status == 200, status
+    count_before = len(before["batches"])
+
+    # 触发复算：以新窑次落库，响应沿用现有窑次字段并增加来源摘要
+    status, body = request("POST", f"{WEB_BASE}/api/batches/{source['id']}/recompute")
+    assert status == 201, (status, body)
+    assert body["id"] != source["id"], body
+    assert body["source_batch_id"] == source["id"], body
+    assert body["recomputed_at"], body
+    assert body["segments_note"] is None, body
+    # 总积分与分段由当前算法重算（与独立复算一致）
+    expected_display = independent_display(RECOMPUTE_MOMENTS)
+    assert body["integral_display"] == expected_display == "21000.0", body
+    assert body["verdict"] == independent_verdict(expected_display), body
+    assert_segments_match(body, RECOMPUTE_MOMENTS)
+    # 来源摘要
+    summary = body["source"]
+    assert summary["id"] == source["id"], summary
+    assert summary["name"] == "VERIFY-RECOMPUTE-SRC", summary
+    assert summary["integral_display"] == source["integral_display"], summary
+    assert summary["verdict"] == source["verdict"], summary
+    assert summary["verdict_label"] == "合格", summary
+
+    # 历史列表：新增一条且标识「复算自某窑次」
+    status, listing = request("GET", f"{WEB_BASE}/api/batches")
+    assert status == 200, status
+    assert len(listing["batches"]) == count_before + 1, listing
+    item = next(b for b in listing["batches"] if b["id"] == body["id"])
+    assert item["source_batch_id"] == source["id"], item
+    assert item["source_name"] == "VERIFY-RECOMPUTE-SRC", item
+
+    # 刷新后复查：详情携带来源摘要，积分/分段为重算结果，原始点逐字保留
+    status, detail = request("GET", f"{WEB_BASE}/api/batches/{body['id']}")
+    assert status == 200, status
+    assert detail["source_batch_id"] == source["id"], detail
+    assert detail["recomputed_at"], detail
+    assert detail["source"]["id"] == source["id"], detail
+    assert detail["points"] == payload["points"], detail["points"]
+    assert_segments_match(detail, RECOMPUTE_MOMENTS)
+
+    # 原记录保持只读：判定与积分不变，且不带来源标记
+    status, original = request("GET", f"{WEB_BASE}/api/batches/{source['id']}")
+    assert status == 200, status
+    assert original["integral_display"] == "21000.0", original
+    assert original["verdict"] == "qualified", original
+    assert original["source_batch_id"] is None and original["source"] is None, original
+
+
+@check("复算：升级前合法旧记录可复算，结论由当前算法给出且原记录只读")
+def _():
+    status, listing = request("GET", f"{WEB_BASE}/api/batches")
+    assert status == 200, status
+    legacy = next(
+        (b for b in listing["batches"] if b["name"] == "LEGACY-QUALIFIED"), None
+    )
+    assert legacy is not None, "legacy-seed 未写入 LEGACY-QUALIFIED"
+
+    status, body = request("POST", f"{WEB_BASE}/api/batches/{legacy['id']}/recompute")
+    assert status == 201, (status, body)
+    assert body["source_batch_id"] == legacy["id"], body
+    assert body["integral_display"] == independent_display(RECOMPUTE_MOMENTS), body
+    assert body["verdict"] == "qualified", body
+    assert body["source"]["name"] == "LEGACY-QUALIFIED", body
+    assert_segments_match(body, RECOMPUTE_MOMENTS)
+
+    # 原旧记录保持只读：判定与积分不动，仍无来源标记
+    status, original = request("GET", f"{WEB_BASE}/api/batches/{legacy['id']}")
+    assert status == 200, status
+    assert original["integral_display"] == "21000.0", original
+    assert original["verdict"] == "qualified", original
+    assert original["source_batch_id"] is None, original
+
+
+@check("复算：不合法旧记录与缺失来源均失败且记录数不变")
+def _():
+    status, listing = request("GET", f"{WEB_BASE}/api/batches")
+    assert status == 200, status
+    count_before = len(listing["batches"])
+    broken = next(
+        (b for b in listing["batches"] if b["name"] == "LEGACY-BROKEN"), None
+    )
+    assert broken is not None, "legacy-seed 未写入 LEGACY-BROKEN"
+
+    # 原始点已无法通过当前校验 -> 422，原因可区分，附全部定位错误
+    status, body = request("POST", f"{WEB_BASE}/api/batches/{broken['id']}/recompute")
+    assert status == 422, (status, body)
+    assert body["detail"]["reason"] == "source_invalid", body
+    assert body["detail"]["errors"], body
+
+    # 来源不存在 -> 404，原因可区分
+    status, body = request("POST", f"{WEB_BASE}/api/batches/999999/recompute")
+    assert status == 404, (status, body)
+    assert body["detail"]["reason"] == "source_not_found", body
+
+    # 两种失败均不新增记录
+    status, after = request("GET", f"{WEB_BASE}/api/batches")
+    assert status == 200, status
+    assert len(after["batches"]) == count_before, "复算失败不应新增记录"
 
 
 def main() -> int:

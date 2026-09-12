@@ -57,3 +57,12 @@ export async function fetchBatch(id: number): Promise<BatchDetail> {
   if (!response.ok) await parseError(response);
   return (await response.json()) as BatchDetail;
 }
+
+/** 按当前规则复算历史窑次：成功返回新窑次，失败抛出携带原因的错误 */
+export async function recomputeBatch(id: number): Promise<BatchSummary> {
+  const response = await fetch(`${BASE}/batches/${id}/recompute`, {
+    method: "POST",
+  });
+  if (!response.ok) await parseError(response);
+  return (await response.json()) as BatchSummary;
+}

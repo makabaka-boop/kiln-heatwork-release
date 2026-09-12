@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchBatch, fetchBatches } from "./api";
+import { fetchBatch, fetchBatches, recomputeBatch } from "./api";
 import { BatchDetailView } from "./components/BatchDetail";
 import { BatchForm } from "./components/BatchForm";
 import { HistoryList } from "./components/HistoryList";
@@ -15,6 +15,8 @@ export default function App() {
   const [detail, setDetail] = useState<BatchDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [recomputing, setRecomputing] = useState(false);
+  const [recomputeError, setRecomputeError] = useState<string | null>(null);
   /** 单调递增的详情请求序号，只接受最后一次选择的响应，杜绝乱序覆盖 */
   const detailRequestSeq = useRef(0);
 
@@ -39,6 +41,7 @@ export default function App() {
     setDetail(null);
     setDetailLoading(false);
     setDetailError(null);
+    setRecomputeError(null);
     void refresh();
   };
 
@@ -54,6 +57,7 @@ export default function App() {
     setSelectedId(id);
     setDetail(null);
     setDetailError(null);
+    setRecomputeError(null);
     setDetailLoading(true);
     try {
       const next = await fetchBatch(id);
@@ -65,6 +69,24 @@ export default function App() {
       setDetailError(error instanceof Error ? error.message : "加载详情失败");
     } finally {
       if (detailRequestSeq.current === seq) setDetailLoading(false);
+    }
+  };
+
+  /**
+   * 按当前规则复算：成功则刷新列表并打开新窑次详情（展示来源关系）；
+   * 失败则停留在原详情，仅显示原因提示，不新增记录也不清除当前选择。
+   */
+  const handleRecompute = async (id: number) => {
+    setRecomputing(true);
+    setRecomputeError(null);
+    try {
+      const created = await recomputeBatch(id);
+      await refresh();
+      void handleSelect(created.id);
+    } catch (error) {
+      setRecomputeError(error instanceof Error ? error.message : "复算失败");
+    } finally {
+      setRecomputing(false);
     }
   };
 
@@ -103,7 +125,14 @@ export default function App() {
               {detailError}
             </p>
           )}
-          {detail && <BatchDetailView detail={detail} />}
+          {detail && (
+            <BatchDetailView
+              detail={detail}
+              recomputing={recomputing}
+              recomputeError={recomputeError}
+              onRecompute={(id) => void handleRecompute(id)}
+            />
+          )}
         </div>
       </main>
     </div>

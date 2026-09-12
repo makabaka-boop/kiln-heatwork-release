@@ -29,7 +29,8 @@ WEB_PORT=9000 API_PORT=9001 docker compose up --build
 
 `verify` 是一次性验收服务，对运行中的 web 与 api 做真实 HTTP 联调：
 经 nginx 代理提交合法/边界/非法批次，并用**独立复写的积分实现**复核
-积分、舍入、结论、分段明细与落库行为，全部通过则以退出码 0 结束。
+积分、舍入、结论、分段明细与落库行为，另覆盖「按当前规则复算」的
+成功、失败与来源展示链路，全部通过则以退出码 0 结束。
 `legacy-seed`（仅 verify profile）会先向 api 的卷写入两条模拟
 「升级前保存」的旧记录（无分段明细），verify 借此验收升级兼容性。
 
@@ -109,6 +110,29 @@ docker compose --profile verify up --build --exit-code-from verify --abort-on-co
 或未严格递增），详情仍展示原判定，`segments` 为 `null`，
 并由 `segments_note` 说明无法生成明细的原因。
 
+## 按当前规则复算
+
+质检员复查历史窑次时，可能希望用当前计热实现重新生成一份可追溯结果，
+而不覆盖当时保存的判定。在历史详情页点击「按当前规则复算」后，
+后端读取该记录的**原始采样点**，走与正常提交完全一致的校验、
+线性插值、分段贡献与判定链路，结果以**新窑次**落库——保存来源窑次
+编号（`source_batch_id`）与复算时间（`recomputed_at`），
+原记录保持只读。
+
+复算创建响应沿用现有窑次字段并增加来源摘要 `source`（来源窑次的
+编号、名称、展示值、结论与提交时间）；历史列表以「复算自某窑次」
+标识（`source_name`），详情页展示来源与复算时间。普通提交及旧库
+记录的响应字段保持兼容，新增字段为 `null`。
+
+失败响应按原因区分，且均不新增记录：
+
+| 情形 | 状态码 | `detail.reason` |
+| --- | --- | --- |
+| 来源窑次不存在 | 404 | `source_not_found` |
+| 原始采样点已无法通过当前校验 | 422 | `source_invalid`（附全部定位错误） |
+
+复算失败时页面停留在原详情并显示提示，不清除当前选择。
+
 ## 提交校验
 
 | 规则 | 错误定位 |
@@ -128,8 +152,9 @@ docker compose --profile verify up --build --exit-code-from verify --abort-on-co
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查 |
 | POST | `/api/batches` | 提交窑次；201 返回判定与分段明细，422 返回全部定位错误 |
-| GET | `/api/batches` | 历史列表（新的在前） |
+| GET | `/api/batches` | 历史列表（新的在前），复算记录带来源标识 |
 | GET | `/api/batches/{id}` | 详情，含原始采样点、未舍入积分与分段明细 |
+| POST | `/api/batches/{id}/recompute` | 按当前规则复算该窑次；201 返回新窑次与来源摘要，404/422 区分失败原因 |
 
 提交体：
 
@@ -148,7 +173,10 @@ docker compose --profile verify up --build --exit-code-from verify --abort-on-co
 `verdict_label` 为 `欠烧 | 合格 | 过烧`；`segments` 为逐段贡献明细
 （见上节），`segments_note` 为 `null`。详情响应字段相同；升级前的
 旧记录若无法补算明细，则 `segments` 为 `null`、`segments_note`
-说明原因，原判定与积分不受影响。
+说明原因，原判定与积分不受影响。复算生成的记录另带
+`source_batch_id`、`recomputed_at` 与来源摘要 `source`
+（普通提交与旧记录为 `null`；列表响应对应为
+`source_batch_id` / `source_name`）。
 
 422 响应：
 
@@ -167,13 +195,13 @@ docker compose --profile verify up --build --exit-code-from verify --abort-on-co
 ## 测试
 
 ```bash
-# 后端：积分边界、分段明细、校验、API 落库、旧库升级兼容（61 例）
+# 后端：积分边界、分段明细、校验、API 落库、复算、旧库升级兼容（67 例）
 cd api && pip install -r requirements-dev.txt && pytest
 
-# 前端：错误映射、结论展示、分段明细表、表单交互（15 例）
+# 前端：错误映射、结论展示、分段明细表、表单交互、复算流程（24 例）
 cd web && npm ci && npm test
 
-# 真实联调：浏览器 -> web -> api -> SQLite（3 例）
+# 真实联调：浏览器 -> web -> api -> SQLite（4 例）
 docker compose up --build -d          # 或本地起 uvicorn + vite preview
 cd web && npx playwright install chromium
 PLAYWRIGHT_BASE_URL=http://localhost:8080 npm run test:e2e

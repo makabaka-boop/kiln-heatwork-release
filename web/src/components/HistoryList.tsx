@@ -36,7 +36,17 @@ export function HistoryList({ batches, selectedId, onSelect }: Props) {
                   className={batch.id === selectedId ? "selected" : ""}
                   onClick={() => onSelect(batch.id)}
                 >
-                  <td>{batch.name}</td>
+                  <td>
+                    {batch.name}
+                    {batch.source_batch_id != null && (
+                      <span
+                        className="source-tag"
+                        data-testid={`history-source-${batch.id}`}
+                      >
+                        复算自 {batch.source_name ?? `窑次 #${batch.source_batch_id}`}
+                      </span>
+                    )}
+                  </td>
                   <td>{batch.point_count}</td>
                   <td>{batch.integral_display}</td>
                   <td>

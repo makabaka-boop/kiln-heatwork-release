@@ -2,7 +2,21 @@ import type { BatchDetail } from "../types";
 import { verdictMeta } from "../verdict";
 import { SegmentsTable } from "./SegmentsTable";
 
-export function BatchDetailView({ detail }: { detail: BatchDetail }) {
+interface Props {
+  detail: BatchDetail;
+  /** 复算请求进行中：按钮禁用，防止重复触发 */
+  recomputing: boolean;
+  /** 复算失败的原因提示；为 null 时不展示 */
+  recomputeError: string | null;
+  onRecompute: (id: number) => void;
+}
+
+export function BatchDetailView({
+  detail,
+  recomputing,
+  recomputeError,
+  onRecompute,
+}: Props) {
   const meta = verdictMeta(detail.verdict);
   return (
     <section className="card" data-testid="batch-detail">
@@ -20,7 +34,38 @@ export function BatchDetailView({ detail }: { detail: BatchDetail }) {
         <dd data-testid="detail-integral-raw">{detail.integral_raw}</dd>
         <dt>提交时间</dt>
         <dd>{new Date(detail.created_at).toLocaleString()}</dd>
+        {detail.source && (
+          <>
+            <dt>来源</dt>
+            <dd data-testid="detail-source">
+              复算自窑次 #{detail.source.id}「{detail.source.name}」（原判定{" "}
+              {detail.source.verdict_label}，{detail.source.integral_display}{" "}
+              °C·min）
+            </dd>
+            <dt>复算时间</dt>
+            <dd data-testid="detail-recomputed-at">
+              {detail.recomputed_at
+                ? new Date(detail.recomputed_at).toLocaleString()
+                : "—"}
+            </dd>
+          </>
+        )}
       </dl>
+      <div className="recompute-actions">
+        <button
+          type="button"
+          onClick={() => onRecompute(detail.id)}
+          disabled={recomputing}
+          data-testid="recompute-button"
+        >
+          {recomputing ? "复算中…" : "按当前规则复算"}
+        </button>
+        {recomputeError && (
+          <em className="field-error" data-testid="recompute-error">
+            {recomputeError}
+          </em>
+        )}
+      </div>
       <h3 className="segments-title">分段计热明细</h3>
       <div data-testid="detail-segments">
         <SegmentsTable segments={detail.segments} note={detail.segments_note} />

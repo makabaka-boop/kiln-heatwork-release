@@ -18,6 +18,16 @@ export interface SegmentContribution {
   share: number;
 }
 
+/** 复算记录响应中携带的来源窑次摘要 */
+export interface BatchSourceSummary {
+  id: number;
+  name: string;
+  integral_display: string;
+  verdict: Verdict;
+  verdict_label: string;
+  created_at: string;
+}
+
 export interface BatchSummary {
   id: number;
   name: string;
@@ -31,6 +41,14 @@ export interface BatchSummary {
   segments?: SegmentContribution[] | null;
   /** segments 为 null 时的原因说明 */
   segments_note?: string | null;
+  /** 复算记录指向的来源窑次 id；普通提交与旧记录为 null */
+  source_batch_id?: number | null;
+  /** 来源窑次名称（历史列表响应携带） */
+  source_name?: string | null;
+  /** 复算时间；普通提交与旧记录为 null */
+  recomputed_at?: string | null;
+  /** 来源窑次摘要（创建/详情响应携带） */
+  source?: BatchSourceSummary | null;
 }
 
 export interface BatchDetail extends BatchSummary {

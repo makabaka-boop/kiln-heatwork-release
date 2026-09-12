@@ -69,8 +69,61 @@ test.describe("窑炉烧成判定台联调", () => {
     ).toHaveText("3000");
   });
 
-  test("边界提交：积分恰为 18000.0 判合格", async ({ page }) => {
+  test("按当前规则复算：新记录落库并展示来源，刷新后可复查", async ({
+    page,
+  }) => {
     await page.goto("/");
+
+    await page.getByTestId("sample-fill").click();
+    const name = `K-E2E-RECOMPUTE-${Date.now()}`;
+    await page.getByTestId("name-input").fill(name);
+    await page.getByTestId("submit-batch").click();
+    await expect(page.getByTestId("result-verdict")).toHaveText("合格");
+
+    // 打开历史详情，点击「按当前规则复算」
+    await page
+      .getByTestId("history-table")
+      .locator("tr", { hasText: name })
+      .first()
+      .click();
+    await expect(page.getByTestId("batch-detail")).toBeVisible();
+    await page.getByTestId("recompute-button").click();
+
+    // 新窑次详情：展示「复算自某窑次」与复算时间
+    await expect(page.getByTestId("detail-source")).toContainText("复算自窑次");
+    await expect(page.getByTestId("detail-source")).toContainText(name);
+    await expect(page.getByTestId("detail-recomputed-at")).toBeVisible();
+    // 总积分与分段由当前算法重算：21000.0，分段 6000 / 12000 / 3000
+    await expect(page.getByTestId("detail-integral-display")).toHaveText(
+      "21000.0 °C·min",
+    );
+    const detailSegments = page.getByTestId("detail-segments");
+    await expect(
+      detailSegments.getByTestId("segment-0-contribution"),
+    ).toHaveText("6000");
+    await expect(
+      detailSegments.getByTestId("segment-1-contribution"),
+    ).toHaveText("12000");
+    await expect(
+      detailSegments.getByTestId("segment-2-contribution"),
+    ).toHaveText("3000");
+    // 历史列表标识「复算自某窑次」
+    await expect(page.getByText(`复算自 ${name}`)).toBeVisible();
+
+    // 刷新后复查：最新一条即复算记录，来源关系仍在
+    await page.reload();
+    await page
+      .getByTestId("history-table")
+      .locator("tbody tr")
+      .first()
+      .click();
+    await expect(page.getByTestId("detail-source")).toContainText(name);
+    await expect(page.getByTestId("detail-integral-display")).toHaveText(
+      "21000.0 °C·min",
+    );
+  });
+
+  test("边界提交：积分恰为 18000.0 判合格", async ({ page }) => {    await page.goto("/");
     await page.getByTestId("name-input").fill(`K-E2E-EDGE-${Date.now()}`);
     // 660°C 恒温 300 min -> (660-600)*300 = 18000.0，恰好落在合格下沿
     await page.getByTestId("json-toggle").click();

@@ -42,6 +42,10 @@ class TestValidSubmission:
         assert body["integral_display"] == "18000.0"
         assert body["verdict"] == "qualified"
         assert body["verdict_label"] == "合格"
+        # 普通提交：无来源标记，响应字段保持兼容
+        assert body["source_batch_id"] is None
+        assert body["recomputed_at"] is None
+        assert body["source"] is None
 
         # 模拟刷新/重启：换一个 TestClient 实例，数据仍在
         with TestClient(app) as reopened:
@@ -214,7 +218,101 @@ class TestSegmentBreakdown:
             "verdict",
             "verdict_label",
             "created_at",
+            "source_batch_id",
+            "source_name",
         }
+        # 普通提交：无来源标记
+        assert item["source_batch_id"] is None
+        assert item["source_name"] is None
+
+
+class TestRecompute:
+    """按当前规则复算：新窑次落库并标注来源，原记录保持只读。"""
+
+    CURVE = [
+        {"time": "2026-09-11T08:00:00Z", "temperature": 600},
+        {"time": "2026-09-11T10:00:00Z", "temperature": 700},
+        {"time": "2026-09-11T12:00:00Z", "temperature": 700},
+        {"time": "2026-09-11T13:00:00Z", "temperature": 600},
+    ]
+
+    def _create_source(self, client, name="K-src"):
+        response = client.post("/api/batches", json={"name": name, "points": self.CURVE})
+        assert response.status_code == 201
+        return response.json()
+
+    def test_recompute_creates_new_record_with_source_summary(self, client):
+        source = self._create_source(client)
+        before = db.count_batches()
+
+        response = client.post(f"/api/batches/{source['id']}/recompute")
+        assert response.status_code == 201
+        body = response.json()
+        # 以新窑次落库，沿用现有窑次字段
+        assert body["id"] != source["id"]
+        assert db.count_batches() == before + 1
+        # 总积分与分段由当前算法重算
+        assert body["integral_raw"] == 21000.0
+        assert body["integral_display"] == "21000.0"
+        assert body["verdict"] == "qualified"
+        assert body["verdict_label"] == "合格"
+        assert [s["contribution"] for s in body["segments"]] == [6000, 12000, 3000]
+        assert body["segments_note"] is None
+        # 来源窑次编号与复算时间
+        assert body["source_batch_id"] == source["id"]
+        assert body["recomputed_at"] is not None
+        # 来源摘要
+        summary = body["source"]
+        assert summary["id"] == source["id"]
+        assert summary["name"] == "K-src"
+        assert summary["integral_display"] == "21000.0"
+        assert summary["verdict"] == "qualified"
+        assert summary["verdict_label"] == "合格"
+        assert summary["created_at"] == source["created_at"]
+
+    def test_recompute_review_after_reload_and_source_readonly(self, client):
+        source = self._create_source(client)
+        created = client.post(f"/api/batches/{source['id']}/recompute").json()
+
+        # 刷新后复查：详情携带来源摘要与复算时间，原始点逐字保留
+        detail = client.get(f"/api/batches/{created['id']}").json()
+        assert detail["source_batch_id"] == source["id"]
+        assert detail["recomputed_at"] is not None
+        assert detail["source"]["id"] == source["id"]
+        assert detail["source"]["name"] == "K-src"
+        assert detail["points"] == self.CURVE
+        assert [s["contribution"] for s in detail["segments"]] == [6000, 12000, 3000]
+
+        # 历史列表标识「复算自某窑次」
+        listing = client.get("/api/batches").json()["batches"]
+        item = next(b for b in listing if b["id"] == created["id"])
+        assert item["source_batch_id"] == source["id"]
+        assert item["source_name"] == "K-src"
+        plain = next(b for b in listing if b["id"] == source["id"])
+        assert plain["source_batch_id"] is None
+        assert plain["source_name"] is None
+
+        # 原记录保持只读：判定、积分不变，且不带来源标记
+        original = client.get(f"/api/batches/{source['id']}").json()
+        assert original["integral_display"] == "21000.0"
+        assert original["verdict"] == "qualified"
+        assert original["source_batch_id"] is None
+        assert original["recomputed_at"] is None
+        assert original["source"] is None
+
+    def test_recompute_missing_source_returns_404_reason(self, client):
+        response = client.post("/api/batches/999/recompute")
+        assert response.status_code == 404
+        assert response.json()["detail"]["reason"] == "source_not_found"
+        assert db.count_batches() == 0
+
+    def test_recompute_of_recompute_chains_to_new_source(self, client):
+        source = self._create_source(client)
+        first = client.post(f"/api/batches/{source['id']}/recompute").json()
+        second = client.post(f"/api/batches/{first['id']}/recompute").json()
+        assert second["source_batch_id"] == first["id"]
+        assert second["source"]["id"] == first["id"]
+        assert db.count_batches() == 3
 
 
 # 升级前的旧表结构（无 segments_json 列）
@@ -343,3 +441,33 @@ class TestLegacyMigration:
         assert response.status_code == 201
         (segment,) = response.json()["segments"]
         assert segment["contribution"] == 18000.0
+
+    def test_recompute_legacy_valid_record(self, legacy_db, legacy_client):
+        # LEGACY-OK（id=1）的原始点仍通过当前校验：复算成功并以新窑次落库
+        response = legacy_client.post("/api/batches/1/recompute")
+        assert response.status_code == 201
+        body = response.json()
+        assert body["source_batch_id"] == 1
+        assert body["recomputed_at"] is not None
+        assert body["integral_display"] == "21000.0"
+        assert body["verdict"] == "qualified"
+        assert [s["contribution"] for s in body["segments"]] == [6000, 12000, 3000]
+        assert body["source"]["name"] == "LEGACY-OK"
+        # 原旧记录保持只读：结论不动、不明细回写、无来源标记
+        row = sqlite3.connect(legacy_db).execute(
+            "SELECT verdict, segments_json, source_batch_id, recomputed_at"
+            " FROM batches WHERE id = 1"
+        ).fetchone()
+        assert row == ("qualified", None, None, None)
+
+    def test_recompute_legacy_broken_record_fails_without_new_record(
+        self, legacy_client
+    ):
+        # LEGACY-BROKEN（id=2）的原始点已无法通过当前校验：复算失败且不落库
+        before = db.count_batches()
+        response = legacy_client.post("/api/batches/2/recompute")
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert detail["reason"] == "source_invalid"
+        assert detail["errors"]
+        assert db.count_batches() == before
