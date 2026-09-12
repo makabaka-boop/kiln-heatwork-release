@@ -7,6 +7,7 @@ from fractions import Fraction
 from app.heatwork import (
     classify,
     compute_heatwork,
+    compute_segment_contributions,
     round_half_up_1,
 )
 
@@ -69,6 +70,68 @@ class TestSegmentIntegration:
         # 650.5°C 恒定 90 min：50.5 * 90 = 4545 °C·min
         points = [(at(minutes=0), 650.5), (at(minutes=90), 650.5)]
         assert compute_heatwork(points) == Fraction(4545)
+
+
+class TestSegmentContributions:
+    """逐相邻段贡献明细：分钟数、贡献值与总积分的一致性。"""
+
+    def test_crossing_up_splits_heating_minutes(self):
+        # 500 -> 700 用 60 min，30 min 处越过 600°C：仅后 30 min 计热
+        points = [(at(minutes=0), 500.0), (at(minutes=60), 700.0)]
+        (seg,) = compute_segment_contributions(points)
+        assert seg.index == 0
+        assert seg.start == at(minutes=0) and seg.end == at(minutes=60)
+        assert seg.heating_minutes == Fraction(30)
+        assert seg.contribution == Fraction(1500)
+
+    def test_crossing_down_splits_heating_minutes(self):
+        points = [(at(minutes=0), 700.0), (at(minutes=60), 500.0)]
+        (seg,) = compute_segment_contributions(points)
+        assert seg.heating_minutes == Fraction(30)
+        assert seg.contribution == Fraction(1500)
+
+    def test_all_below_base_keeps_zero_contribution_segment(self):
+        # 全程低于起点：段保留，分钟数与贡献均为 0
+        points = [(at(minutes=0), 500.0), (at(minutes=120), 550.0)]
+        (seg,) = compute_segment_contributions(points)
+        assert seg.heating_minutes == 0
+        assert seg.contribution == 0
+
+    def test_fully_above_base_counts_whole_segment(self):
+        points = [(at(minutes=0), 660.0), (at(minutes=300), 660.0)]
+        (seg,) = compute_segment_contributions(points)
+        assert seg.heating_minutes == Fraction(300)
+        assert seg.contribution == Fraction(18000)
+
+    def test_multi_segment_curve_matches_readme(self):
+        # README 示例曲线：6000 / 12000 / 3000，合计 21000
+        points = [
+            (at(minutes=0), 600.0),
+            (at(minutes=120), 700.0),
+            (at(minutes=240), 700.0),
+            (at(minutes=300), 600.0),
+        ]
+        segments = compute_segment_contributions(points)
+        assert [s.index for s in segments] == [0, 1, 2]
+        assert [s.heating_minutes for s in segments] == [120, 120, 60]
+        assert [s.contribution for s in segments] == [6000, 12000, 3000]
+
+    def test_segment_sum_equals_total_integral(self):
+        # 各段贡献之和与总积分在精确有理数层面一致
+        points = [
+            (at(minutes=0), 550.0),
+            (at(minutes=45), 705.5),
+            (at(minutes=90), 598.0),
+            (at(minutes=200), 800.0),
+            (at(minutes=260), 500.0),
+        ]
+        segments = compute_segment_contributions(points)
+        assert sum((s.contribution for s in segments), Fraction(0)) == (
+            compute_heatwork(points)
+        )
+
+    def test_single_point_yields_no_segments(self):
+        assert compute_segment_contributions([(at(minutes=0), 700.0)]) == []
 
 
 class TestRounding:

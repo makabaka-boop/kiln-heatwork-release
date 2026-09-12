@@ -21,15 +21,17 @@ docker compose up --build
 WEB_PORT=9000 API_PORT=9001 docker compose up --build
 ```
 
-合法提交会保存**原始采样点、未舍入积分、展示值与结论**到 SQLite
-（命名卷 `api-data`），刷新页面后仍可在「历史记录」中点开复查；
+合法提交会保存**原始采样点、未舍入积分、展示值、结论与逐段计热贡献明细**
+到 SQLite（命名卷 `api-data`），刷新页面后仍可在「历史记录」中点开复查；
 任一采样点非法则整次不落库，页面在对应位置标出索引与原因。
 
 ## 一键验收
 
 `verify` 是一次性验收服务，对运行中的 web 与 api 做真实 HTTP 联调：
 经 nginx 代理提交合法/边界/非法批次，并用**独立复写的积分实现**复核
-积分、舍入、结论与落库行为，全部通过则以退出码 0 结束。
+积分、舍入、结论、分段明细与落库行为，全部通过则以退出码 0 结束。
+`legacy-seed`（仅 verify profile）会先向 api 的卷写入两条模拟
+「升级前保存」的旧记录（无分段明细），verify 借此验收升级兼容性。
 
 ```bash
 docker compose --profile verify up --build --exit-code-from verify --abort-on-container-exit
@@ -82,6 +84,31 @@ docker compose --profile verify up --build --exit-code-from verify --abort-on-co
 合计                                       = 21000.0 °C·min -> 合格
 ```
 
+## 分段计热贡献明细
+
+仅看总热值难以定位哪段升温或保温贡献异常，因此每次合法提交还会按
+**相邻采样段**生成贡献明细，与原始点、总积分在同一事务中落库，
+并随创建响应与详情响应返回（`segments` 字段，按时间顺序）：
+
+| 字段 | 含义 |
+| --- | --- |
+| `index` | 段序号（第 `i` 段连接采样点 `i` 与 `i+1`） |
+| `start_time` / `end_time` | 段起止时刻（与提交的原始时刻字符串一致） |
+| `heating_minutes` | 有效计热分钟数：段内温度高于 600 °C 的时长（穿越段只算交点一侧） |
+| `contribution` | 该段未舍入贡献值（°C·min） |
+| `share` | 占总积分的比例（总量为 0 时各段记 0） |
+
+各段 `contribution` 之和与 `integral_raw` 在精确有理数层面恒等；
+低于起点的零贡献段同样保留展示。页面在提交成功后的判定结果中
+直接展示明细表，历史详情中按时间顺序呈现。
+
+**升级兼容**：旧版本库的 `batches` 表没有明细列，启动时自动
+`ALTER TABLE` 补齐，已有记录该列为 NULL。读取旧记录的详情时，
+服务依据已存原始点**确定性补算**明细后返回，不回写数据库、
+不改动原结论；若已存采样点无法形成合法时间序列（时刻不可解析
+或未严格递增），详情仍展示原判定，`segments` 为 `null`，
+并由 `segments_note` 说明无法生成明细的原因。
+
 ## 提交校验
 
 | 规则 | 错误定位 |
@@ -100,9 +127,9 @@ docker compose --profile verify up --build --exit-code-from verify --abort-on-co
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查 |
-| POST | `/api/batches` | 提交窑次；201 返回判定，422 返回全部定位错误 |
+| POST | `/api/batches` | 提交窑次；201 返回判定与分段明细，422 返回全部定位错误 |
 | GET | `/api/batches` | 历史列表（新的在前） |
-| GET | `/api/batches/{id}` | 详情，含原始采样点与未舍入积分 |
+| GET | `/api/batches/{id}` | 详情，含原始采样点、未舍入积分与分段明细 |
 
 提交体：
 
@@ -118,7 +145,10 @@ docker compose --profile verify up --build --exit-code-from verify --abort-on-co
 
 201 响应（节选）：`integral_raw` 为未舍入积分，`integral_display`
 为一位小数字符串，`verdict` ∈ `underfired | qualified | overfired`，
-`verdict_label` 为 `欠烧 | 合格 | 过烧`。
+`verdict_label` 为 `欠烧 | 合格 | 过烧`；`segments` 为逐段贡献明细
+（见上节），`segments_note` 为 `null`。详情响应字段相同；升级前的
+旧记录若无法补算明细，则 `segments` 为 `null`、`segments_note`
+说明原因，原判定与积分不受影响。
 
 422 响应：
 
@@ -137,10 +167,10 @@ docker compose --profile verify up --build --exit-code-from verify --abort-on-co
 ## 测试
 
 ```bash
-# 后端：积分边界、校验、API 落库（45 例）
+# 后端：积分边界、分段明细、校验、API 落库、旧库升级兼容（61 例）
 cd api && pip install -r requirements-dev.txt && pytest
 
-# 前端：错误映射、结论展示、表单交互（11 例）
+# 前端：错误映射、结论展示、分段明细表、表单交互（15 例）
 cd web && npm ci && npm test
 
 # 真实联调：浏览器 -> web -> api -> SQLite（3 例）
@@ -171,15 +201,17 @@ cd web && npm ci && npm run dev        # http://localhost:5173（/api 已代理�
 ## 目录结构
 
 ```
-├── docker-compose.yml      # web / api / verify 三服务
+├── docker-compose.yml      # web / api / verify / legacy-seed 服务
 ├── api/                    # FastAPI 后端
-│   ├── app/heatwork.py     #   计热积分（精确有理数 + half-up 舍入）
+│   ├── app/heatwork.py     #   计热积分与逐段贡献（精确有理数 + half-up 舍入）
 │   ├── app/validation.py   #   逐点校验，收集全部可定位错误
-│   ├── app/db.py           #   SQLite 落库
-│   └── tests/              #   pytest：积分边界 / 校验 / API 联调
+│   ├── app/db.py           #   SQLite 落库与旧表就地升级
+│   └── tests/              #   pytest：积分边界 / 分段明细 / 校验 / 升级兼容
 ├── web/                    # React 前端
-│   ├── src/components/     #   表单（逐点错误定位）、结果、历史、详情
+│   ├── src/components/     #   表单（逐点错误定位）、结果、分段明细、历史、详情
 │   ├── src/__tests__/      #   Vitest 单元与组件测试
 │   └── e2e/                #   Playwright 真实联调
 └── verify/                 # 一次性验收服务（独立复算 + 真实 HTTP）
+    ├── verify.py           #   验收用例
+    └── legacy_seed.py      #   写入模拟「升级前」的旧记录（仅 verify profile）
 ```

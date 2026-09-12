@@ -34,6 +34,21 @@ services:
       retries: 12
       start_period: 10s
 
+  # 升级前数据种子：向 api 的卷写入两条无分段明细的旧记录（模拟历史库）
+  legacy-seed:
+    build: ./verify
+    profiles: ["verify"]
+    command: ["python", "legacy_seed.py"]
+    environment:
+      API_BASE: http://api:8000
+      HEATWORK_DB: /data/heatwork.db
+    volumes:
+      - api-data:/data
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: "no"
+
   # 一次性验收服务：docker compose --profile verify up --build --exit-code-from verify
   verify:
     build: ./verify
@@ -46,6 +61,8 @@ services:
         condition: service_healthy
       web:
         condition: service_healthy
+      legacy-seed:
+        condition: service_completed_successfully
     restart: "no"
 
 volumes:

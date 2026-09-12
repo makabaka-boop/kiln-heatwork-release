@@ -23,22 +23,34 @@ FAILURES: list[str] = []
 
 # ---------- 独立复写的计热实现（与被测服务无共享代码） ----------
 
-def independent_heatwork(points: list[tuple[datetime, float]]) -> Fraction:
-    total = Fraction(0)
+def _minutes_of(delta: timedelta) -> Fraction:
+    micros = delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
+    return Fraction(micros, 60_000_000)
+
+
+def independent_segments(
+    points: list[tuple[datetime, float]],
+) -> list[tuple[Fraction, Fraction]]:
+    """逐相邻段独立复算：返回 [(有效计热分钟数, 未舍入贡献)]。"""
+    segments: list[tuple[Fraction, Fraction]] = []
     for (t0, temp0), (t1, temp1) in zip(points, points[1:]):
-        delta = t1 - t0
-        micros = delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
-        dt_min = Fraction(micros, 60_000_000)
+        dt_min = _minutes_of(t1 - t0)
         e0, e1 = Fraction(temp0) - 600, Fraction(temp1) - 600
         if e0 <= 0 and e1 <= 0:
-            continue
-        if e0 > 0 and e1 > 0:
-            total += (e0 + e1) * dt_min / 2
+            segments.append((Fraction(0), Fraction(0)))
+        elif e0 > 0 and e1 > 0:
+            segments.append((dt_min, (e0 + e1) * dt_min / 2))
         elif e0 > 0:
-            total += e0 * (e0 / (e0 - e1)) * dt_min / 2
+            s_star = e0 / (e0 - e1)
+            segments.append((s_star * dt_min, e0 * s_star * dt_min / 2))
         else:
-            total += e1 * (1 - e0 / (e0 - e1)) * dt_min / 2
-    return total
+            s_star = e0 / (e0 - e1)
+            segments.append(((1 - s_star) * dt_min, e1 * (1 - s_star) * dt_min / 2))
+    return segments
+
+
+def independent_heatwork(points: list[tuple[datetime, float]]) -> Fraction:
+    return sum((contribution for _, contribution in independent_segments(points)), Fraction(0))
 
 
 def independent_display(points: list[tuple[datetime, float]]) -> str:
@@ -206,6 +218,159 @@ def _():
     status, after = request("GET", f"{WEB_BASE}/api/batches")
     assert status == 200, status
     assert len(after["batches"]) == count_before, "非法提交被落库"
+
+
+# ---------- 分段计热贡献明细 ----------
+
+def assert_segments_match(body: dict, moments: list[tuple[datetime, float]]):
+    """响应中的分段明细与独立复算逐段一致，且总和等于未舍入总积分。"""
+    expected = independent_segments(moments)
+    segments = body["segments"]
+    assert segments is not None and len(segments) == len(expected), body
+    assert body["segments_note"] is None, body
+    for segment, (minutes, contribution) in zip(segments, expected):
+        assert abs(segment["heating_minutes"] - float(minutes)) < 1e-9, segment
+        assert abs(segment["contribution"] - float(contribution)) < 1e-9, segment
+    total = sum(s["contribution"] for s in segments)
+    assert abs(total - body["integral_raw"]) < 1e-9, (total, body["integral_raw"])
+    return segments
+
+
+@check("分段明细：跨越起点自动切段，分钟数与贡献和独立复算一致")
+def _():
+    payload = {
+        "name": "VERIFY-SEG-CROSS",
+        "points": [
+            {"time": "2026-09-11T00:00:00Z", "temperature": 500.0},
+            {"time": "2026-09-11T01:00:00Z", "temperature": 700.0},
+        ],
+    }
+    moments = [
+        (datetime(2026, 9, 11, 0, tzinfo=timezone.utc), 500.0),
+        (datetime(2026, 9, 11, 1, tzinfo=timezone.utc), 700.0),
+    ]
+    status, body = request("POST", f"{WEB_BASE}/api/batches", payload)
+    assert status == 201, (status, body)
+    (segment,) = assert_segments_match(body, moments)
+    # 60 min 内 500 -> 700，30 min 处越过 600°C：仅后 30 min 计热
+    assert segment["heating_minutes"] == 30, segment
+    assert segment["contribution"] == 1500, segment
+    assert segment["share"] == 1.0, segment
+    assert segment["start_time"] == "2026-09-11T00:00:00Z", segment
+    assert segment["end_time"] == "2026-09-11T01:00:00Z", segment
+
+
+@check("分段明细：全程低温的零贡献段保留可见")
+def _():
+    payload = {
+        "name": "VERIFY-SEG-COLD",
+        "points": [
+            {"time": "2026-09-11T00:00:00Z", "temperature": 500.0},
+            {"time": "2026-09-11T02:00:00Z", "temperature": 550.0},
+        ],
+    }
+    moments = [
+        (datetime(2026, 9, 11, 0, tzinfo=timezone.utc), 500.0),
+        (datetime(2026, 9, 11, 2, tzinfo=timezone.utc), 550.0),
+    ]
+    status, body = request("POST", f"{WEB_BASE}/api/batches", payload)
+    assert status == 201, (status, body)
+    assert body["integral_raw"] == 0, body
+    (segment,) = assert_segments_match(body, moments)
+    assert segment["contribution"] == 0, segment
+    assert segment["heating_minutes"] == 0, segment
+    assert segment["share"] == 0, segment
+
+
+@check("分段明细：多段曲线各段之和等于未舍入总积分，详情一致")
+def _():
+    payload = {
+        "name": "VERIFY-SEG-CURVE",
+        "points": [
+            {"time": "2026-09-11T08:00:00Z", "temperature": 600},
+            {"time": "2026-09-11T10:00:00Z", "temperature": 700},
+            {"time": "2026-09-11T12:00:00Z", "temperature": 700},
+            {"time": "2026-09-11T13:00:00Z", "temperature": 600},
+        ],
+    }
+    moments = [
+        (datetime(2026, 9, 11, 8, tzinfo=timezone.utc), 600.0),
+        (datetime(2026, 9, 11, 10, tzinfo=timezone.utc), 700.0),
+        (datetime(2026, 9, 11, 12, tzinfo=timezone.utc), 700.0),
+        (datetime(2026, 9, 11, 13, tzinfo=timezone.utc), 600.0),
+    ]
+    status, body = request("POST", f"{WEB_BASE}/api/batches", payload)
+    assert status == 201, (status, body)
+    segments = assert_segments_match(body, moments)
+    assert [s["heating_minutes"] for s in segments] == [120, 120, 60], segments
+    assert [s["contribution"] for s in segments] == [6000, 12000, 3000], segments
+    assert abs(sum(s["share"] for s in segments) - 1.0) < 1e-9, segments
+    assert body["integral_raw"] == 21000.0, body
+
+    # 历史详情按时间顺序返回同一份明细
+    status, detail = request("GET", f"{WEB_BASE}/api/batches/{body['id']}")
+    assert status == 200, status
+    assert detail["segments"] == segments, detail["segments"]
+    assert detail["segments_note"] is None, detail
+
+
+@check("升级前记录可查看：原结论不改写，明细按已存原始点补算")
+def _():
+    status, listing = request("GET", f"{WEB_BASE}/api/batches")
+    assert status == 200, status
+    legacy = next(
+        (b for b in listing["batches"] if b["name"] == "LEGACY-QUALIFIED"), None
+    )
+    assert legacy is not None, "legacy-seed 未写入 LEGACY-QUALIFIED"
+    # 列表响应保持既有字段
+    assert {
+        "id",
+        "name",
+        "point_count",
+        "integral_raw",
+        "integral_display",
+        "verdict",
+        "verdict_label",
+        "created_at",
+    } <= set(legacy), legacy
+    assert legacy["verdict"] == "qualified" and legacy["verdict_label"] == "合格"
+
+    status, detail = request("GET", f"{WEB_BASE}/api/batches/{legacy['id']}")
+    assert status == 200, status
+    # 原判定与积分保持不动
+    assert detail["verdict"] == "qualified", detail
+    assert detail["integral_display"] == "21000.0", detail
+    assert detail["integral_raw"] == 21000.0, detail
+    # 明细由服务依据已存原始点确定性补算
+    moments = [
+        (datetime(2026, 9, 11, 8, tzinfo=timezone.utc), 600.0),
+        (datetime(2026, 9, 11, 10, tzinfo=timezone.utc), 700.0),
+        (datetime(2026, 9, 11, 12, tzinfo=timezone.utc), 700.0),
+        (datetime(2026, 9, 11, 13, tzinfo=timezone.utc), 600.0),
+    ]
+    segments = assert_segments_match(detail, moments)
+    assert [s["contribution"] for s in segments] == [6000, 12000, 3000], segments
+
+
+@check("升级前异常记录：原判定保留，明细区域说明无法生成原因")
+def _():
+    status, listing = request("GET", f"{WEB_BASE}/api/batches")
+    assert status == 200, status
+    legacy = next(
+        (b for b in listing["batches"] if b["name"] == "LEGACY-BROKEN"), None
+    )
+    assert legacy is not None, "legacy-seed 未写入 LEGACY-BROKEN"
+    assert legacy["verdict"] == "underfired" and legacy["verdict_label"] == "欠烧"
+
+    status, detail = request("GET", f"{WEB_BASE}/api/batches/{legacy['id']}")
+    assert status == 200, status
+    # 原判定照常展示
+    assert detail["verdict"] == "underfired", detail
+    assert detail["integral_display"] == "1500.0", detail
+    # 已存采样点无法形成合法时间序列：明细缺失并说明原因
+    assert detail["segments"] is None, detail
+    assert isinstance(detail["segments_note"], str), detail
+    assert "无法" in detail["segments_note"], detail["segments_note"]
 
 
 def main() -> int:

@@ -21,10 +21,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, localcontext
 from fractions import Fraction
-from typing import Sequence, Tuple, Union
+from typing import List, Sequence, Tuple, Union
 
 #: 计热起点：只累计高于该温度的部分
 HEATWORK_BASE_C = 600
@@ -47,6 +48,21 @@ Number = Union[int, float]
 SamplePoint = Tuple[datetime, Number]
 
 
+@dataclass(frozen=True)
+class SegmentContribution:
+    """单个相邻采样段的计热贡献明细（精确有理数）。
+
+    ``heating_minutes`` 为段内温度高于计热起点的有效计热分钟数；
+    ``contribution`` 为该段对 max(T-600, 0) 积分的未舍入贡献（°C·min）。
+    """
+
+    index: int
+    start: datetime
+    end: datetime
+    heating_minutes: Fraction
+    contribution: Fraction
+
+
 def _minutes(delta: timedelta) -> Fraction:
     """把 timedelta 精确转换为分钟（有理数）。"""
     microseconds = (
@@ -57,41 +73,75 @@ def _minutes(delta: timedelta) -> Fraction:
     return Fraction(microseconds, 60_000_000)
 
 
-def _segment_area(dt_min: Fraction, excess0: Fraction, excess1: Fraction) -> Fraction:
-    """单段对 max(T-600, 0) 的精确积分。
+def _segment_area_and_minutes(
+    dt_min: Fraction, excess0: Fraction, excess1: Fraction
+) -> Tuple[Fraction, Fraction]:
+    """单段的精确积分与有效计热分钟数。
 
     ``dt_min`` 为段长（分钟），``excess0``/``excess1`` 为两端点
     温度减去 600 °C 的超出量（可为负）。段内温度线性变化。
+    返回 ``(面积贡献, 高于计热起点的分钟数)``。
     """
     if excess0 <= 0 and excess1 <= 0:
         # 整段不高于 600 °C，不累计
-        return Fraction(0)
+        return Fraction(0), Fraction(0)
     if excess0 > 0 and excess1 > 0:
-        # 整段高于 600 °C，梯形面积
-        return (excess0 + excess1) * dt_min / 2
+        # 整段高于 600 °C，梯形面积，整段计热
+        return (excess0 + excess1) * dt_min / 2, dt_min
     # 段内跨越 600 °C：先线性求交点位置 s* ∈ (0, 1)，再切段
     # T(s) = T0 + (T1 - T0) * s = 600  =>  s* = excess0 / (excess0 - excess1)
     s_star = excess0 / (excess0 - excess1)
     if excess0 > 0:
-        # 从高于 600 °C 降到交点：三角形面积
-        return excess0 * (s_star * dt_min) / 2
-    # 从交点升到高于 600 °C：三角形面积
-    return excess1 * ((1 - s_star) * dt_min) / 2
+        # 从高于 600 °C 降到交点：三角形面积，前 s* 段计热
+        return excess0 * (s_star * dt_min) / 2, s_star * dt_min
+    # 从交点升到高于 600 °C：三角形面积，后 1-s* 段计热
+    return excess1 * ((1 - s_star) * dt_min) / 2, (1 - s_star) * dt_min
+
+
+def _segment_area(dt_min: Fraction, excess0: Fraction, excess1: Fraction) -> Fraction:
+    """单段对 max(T-600, 0) 的精确积分。"""
+    area, _ = _segment_area_and_minutes(dt_min, excess0, excess1)
+    return area
+
+
+def compute_segment_contributions(
+    points: Sequence[SamplePoint],
+) -> List[SegmentContribution]:
+    """逐相邻采样段计算计热贡献明细，按时间顺序返回。
+
+    ``points`` 为 ``(时刻, 摄氏温度)`` 序列，时刻须已按递增排列。
+    各段贡献之和与 :func:`compute_heatwork` 完全一致（同为精确有理数）；
+    低于计热起点的段保留在结果中，贡献与计热分钟数均为 0。
+    """
+    base = Fraction(HEATWORK_BASE_C)
+    segments: List[SegmentContribution] = []
+    for index, ((t0, temp0), (t1, temp1)) in enumerate(zip(points, points[1:])):
+        dt_min = _minutes(t1 - t0)
+        area, heating = _segment_area_and_minutes(
+            dt_min, Fraction(temp0) - base, Fraction(temp1) - base
+        )
+        segments.append(
+            SegmentContribution(
+                index=index,
+                start=t0,
+                end=t1,
+                heating_minutes=heating,
+                contribution=area,
+            )
+        )
+    return segments
 
 
 def compute_heatwork(points: Sequence[SamplePoint]) -> Fraction:
     """计算一批采样点的烧成计热值，返回精确的 °C·min（Fraction）。
 
     ``points`` 为 ``(时刻, 摄氏温度)`` 序列，时刻须已按递增排列。
+    总积分即各相邻段贡献之和，与分段明细天然一致。
     """
-    if len(points) < 2:
-        return Fraction(0)
-    total = Fraction(0)
-    base = Fraction(HEATWORK_BASE_C)
-    for (t0, temp0), (t1, temp1) in zip(points, points[1:]):
-        dt_min = _minutes(t1 - t0)
-        total += _segment_area(dt_min, Fraction(temp0) - base, Fraction(temp1) - base)
-    return total
+    return sum(
+        (segment.contribution for segment in compute_segment_contributions(points)),
+        Fraction(0),
+    )
 
 
 def round_half_up_1(value: Fraction) -> Decimal:

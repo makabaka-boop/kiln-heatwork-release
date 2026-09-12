@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import Any, Dict
+from datetime import datetime
+from fractions import Fraction
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Body, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import db
-from .heatwork import VERDICT_LABELS, classify, compute_heatwork, round_half_up_1
-from .validation import validate_submission
+from .heatwork import (
+    VERDICT_LABELS,
+    classify,
+    compute_segment_contributions,
+    round_half_up_1,
+)
+from .validation import parse_iso8601, validate_submission
 
 
 @asynccontextmanager
@@ -37,6 +44,70 @@ def _with_label(record: Dict[str, Any]) -> Dict[str, Any]:
     return record
 
 
+def _build_segments(
+    points: List[Tuple[str, datetime, float]],
+) -> Tuple[List[Dict[str, Any]], Fraction]:
+    """由 (原始时刻字符串, 时刻, 温度) 序列生成分段明细与精确总积分。
+
+    总积分取各段贡献之和，保证「各段贡献之和 == 未舍入总积分」
+    在精确有理数层面恒成立；占比在总量为 0 时各段记 0。
+    """
+    contributions = compute_segment_contributions(
+        [(moment, temperature) for _, moment, temperature in points]
+    )
+    total = sum((seg.contribution for seg in contributions), Fraction(0))
+    segments: List[Dict[str, Any]] = []
+    for seg in contributions:
+        segments.append(
+            {
+                "index": seg.index,
+                "start_time": points[seg.index][0],
+                "end_time": points[seg.index + 1][0],
+                "heating_minutes": float(seg.heating_minutes),
+                "contribution": float(seg.contribution),
+                "share": float(seg.contribution / total) if total > 0 else 0.0,
+            }
+        )
+    return segments, total
+
+
+def _recompute_segments(
+    stored_points: Any,
+) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    """为升级前的旧记录补算分段明细（确定性，不改写原结论）。
+
+    返回 (明细, None)；已存采样点无法形成合法时间序列时返回
+    (None, 原因说明)，原判定与积分保持不动。
+    """
+    prefix = "该记录为升级前保存，未保存分段明细；"
+    if not isinstance(stored_points, list) or len(stored_points) < 2:
+        return None, f"{prefix}已存采样点不足 2 个，无法形成计热区段。"
+    parsed: List[Tuple[str, datetime, float]] = []
+    for index, point in enumerate(stored_points):
+        if not isinstance(point, dict):
+            return None, f"{prefix}第 {index} 个采样点不是 JSON 对象，无法补算。"
+        moment, error = parse_iso8601(point.get("time"))
+        if error is not None or moment is None:
+            return None, f"{prefix}第 {index} 个采样点时刻无法解析（{error}），无法补算。"
+        temperature = point.get("temperature")
+        if (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, (int, float))
+            or temperature != temperature  # NaN
+        ):
+            return None, f"{prefix}第 {index} 个采样点温度不是有效数字，无法补算。"
+        parsed.append((point["time"], moment, temperature))
+    for index in range(1, len(parsed)):
+        if parsed[index][1] <= parsed[index - 1][1]:
+            return (
+                None,
+                f"{prefix}已存采样点时刻未严格递增"
+                f"（第 {index} 个不晚于第 {index - 1} 个），无法补算。",
+            )
+    segments, _ = _build_segments(parsed)
+    return segments, None
+
+
 @app.get("/api/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
@@ -58,8 +129,9 @@ def create_batch(payload: Dict[str, Any] = Body(...)) -> Any:
         )
 
     assert normalized is not None
-    sample_points = [(p.moment, p.temperature) for p in normalized.points]
-    integral_raw = compute_heatwork(sample_points)
+    segments, integral_raw = _build_segments(
+        [(p.time_raw, p.moment, p.temperature) for p in normalized.points]
+    )
     display = round_half_up_1(integral_raw)
     verdict = classify(display)
 
@@ -72,7 +144,9 @@ def create_batch(payload: Dict[str, Any] = Body(...)) -> Any:
         integral_raw=float(integral_raw),
         integral_display=str(display),
         verdict=verdict,
+        segments=segments,
     )
+    record["segments_note"] = None
     return _with_label(record)
 
 
@@ -89,4 +163,11 @@ def get_batch(batch_id: int) -> Any:
             status_code=404,
             content={"detail": {"message": f"窑次 {batch_id} 不存在"}},
         )
+    if record["segments"] is None:
+        # 升级前的旧记录：依据已存原始点确定性补算，不回写、不改原结论
+        segments, note = _recompute_segments(record["points"])
+        record["segments"] = segments
+        record["segments_note"] = note
+    else:
+        record["segments_note"] = None
     return _with_label(record)

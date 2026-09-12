@@ -1,5 +1,6 @@
 import type { BatchDetail } from "../types";
 import { verdictMeta } from "../verdict";
+import { SegmentsTable } from "./SegmentsTable";
 
 export function BatchDetailView({ detail }: { detail: BatchDetail }) {
   const meta = verdictMeta(detail.verdict);
@@ -20,6 +21,11 @@ export function BatchDetailView({ detail }: { detail: BatchDetail }) {
         <dt>提交时间</dt>
         <dd>{new Date(detail.created_at).toLocaleString()}</dd>
       </dl>
+      <h3 className="segments-title">分段计热明细</h3>
+      <div data-testid="detail-segments">
+        <SegmentsTable segments={detail.segments} note={detail.segments_note} />
+      </div>
+      <h3 className="segments-title">原始采样点</h3>
       <table className="points-table" data-testid="detail-points">
         <thead>
           <tr>

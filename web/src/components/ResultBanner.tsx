@@ -1,5 +1,6 @@
 import type { BatchSummary } from "../types";
 import { verdictMeta } from "../verdict";
+import { SegmentsTable } from "./SegmentsTable";
 
 export function ResultBanner({ batch }: { batch: BatchSummary }) {
   const meta = verdictMeta(batch.verdict);
@@ -21,6 +22,8 @@ export function ResultBanner({ batch }: { batch: BatchSummary }) {
         <dt>采样点数</dt>
         <dd>{batch.point_count}</dd>
       </dl>
+      <h3 className="segments-title">分段计热明细</h3>
+      <SegmentsTable segments={batch.segments} note={batch.segments_note} />
     </section>
   );
 }

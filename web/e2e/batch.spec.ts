@@ -27,6 +27,14 @@ test.describe("窑炉烧成判定台联调", () => {
     );
     await expect(page.getByTestId("result-integral-raw")).toHaveText("21000");
 
+    // 提交成功后直接展示分段明细：3 段，贡献 6000 / 12000 / 3000
+    await expect(page.getByTestId("segments-table")).toBeVisible();
+    await expect(page.getByTestId("segment-0-contribution")).toHaveText("6000");
+    await expect(page.getByTestId("segment-1-contribution")).toHaveText(
+      "12000",
+    );
+    await expect(page.getByTestId("segment-2-contribution")).toHaveText("3000");
+
     // 历史记录出现该批次
     const history = page.getByTestId("history-table");
     await expect(history).toBeVisible();
@@ -50,6 +58,15 @@ test.describe("窑炉烧成判定台联调", () => {
       "2026-09-11T08:00:00Z",
     );
     await expect(page.getByTestId("detail-row-3")).toContainText("600");
+
+    // 历史详情中分段明细按时间顺序呈现
+    const detailSegments = page.getByTestId("detail-segments");
+    await expect(
+      detailSegments.getByTestId("segment-row-0"),
+    ).toContainText("2026-09-11T08:00:00Z");
+    await expect(
+      detailSegments.getByTestId("segment-2-contribution"),
+    ).toHaveText("3000");
   });
 
   test("边界提交：积分恰为 18000.0 判合格", async ({ page }) => {

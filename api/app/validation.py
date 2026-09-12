@@ -51,7 +51,7 @@ class NormalizedSubmission:
     points: List[NormalizedPoint]
 
 
-def _parse_iso8601(value: Any) -> Tuple[Optional[datetime], Optional[str]]:
+def parse_iso8601(value: Any) -> Tuple[Optional[datetime], Optional[str]]:
     """解析 ISO 8601 时刻；naive 时刻按 UTC 处理。返回 (时刻, 错误信息)。"""
     if not isinstance(value, str) or not value.strip():
         return None, "时刻必须为 ISO 8601 字符串，例如 2026-09-11T08:00:00Z"
@@ -65,6 +65,10 @@ def _parse_iso8601(value: Any) -> Tuple[Optional[datetime], Optional[str]]:
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
     return moment, None
+
+
+# 兼容内部旧引用
+_parse_iso8601 = parse_iso8601
 
 
 def _validate_temperature(value: Any) -> Optional[str]:
