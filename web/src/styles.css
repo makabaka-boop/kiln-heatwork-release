@@ -325,3 +325,12 @@ button.primary:hover:not(:disabled) {
 .empty {
   color: var(--muted);
 }
+
+.detail-status {
+  margin-top: 14px;
+  margin-bottom: 0;
+}
+
+.field-error.detail-status {
+  color: var(--bad);
+}

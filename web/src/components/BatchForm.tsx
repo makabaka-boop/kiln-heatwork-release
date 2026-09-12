@@ -36,9 +36,14 @@ function parseTemperature(text: string): unknown {
 
 interface Props {
   onCreated: (batch: BatchSummary) => void;
+  /**
+   * 名称或采样点被再次编辑时回调：上一次提交的判定结果已与当前输入不符，
+   * 由父组件隐藏已失效的结果。
+   */
+  onDirty?: () => void;
 }
 
-export function BatchForm({ onCreated }: Props) {
+export function BatchForm({ onCreated, onDirty }: Props) {
   const [name, setName] = useState("");
   const [rows, setRows] = useState<Row[]>(emptyRows);
   const [errors, setErrors] = useState<FormErrors>(EMPTY_ERRORS);
@@ -50,6 +55,7 @@ export function BatchForm({ onCreated }: Props) {
 
   const updateRow = (index: number, patch: Partial<Row>) => {
     resetErrors();
+    onDirty?.();
     setRows((prev) =>
       prev.map((row, i) => (i === index ? { ...row, ...patch } : row)),
     );
@@ -57,6 +63,7 @@ export function BatchForm({ onCreated }: Props) {
 
   const addRow = () => {
     resetErrors();
+    onDirty?.();
     setRows((prev) =>
       prev.length >= MAX_ROWS ? prev : [...prev, { time: "", temperature: "" }],
     );
@@ -64,6 +71,7 @@ export function BatchForm({ onCreated }: Props) {
 
   const removeRow = (index: number) => {
     resetErrors();
+    onDirty?.();
     setRows((prev) =>
       prev.length <= MIN_ROWS ? prev : prev.filter((_, i) => i !== index),
     );
@@ -72,6 +80,7 @@ export function BatchForm({ onCreated }: Props) {
   const fillSample = () => {
     resetErrors();
     setJsonError(null);
+    onDirty?.();
     setName("K-2026-0911-A");
     setRows(SAMPLE_ROWS.map((row) => ({ ...row })));
   };
@@ -110,6 +119,7 @@ export function BatchForm({ onCreated }: Props) {
       });
     }
     setRows(next);
+    onDirty?.();
   };
 
   const submit = async (event: React.FormEvent) => {
@@ -150,6 +160,7 @@ export function BatchForm({ onCreated }: Props) {
           value={name}
           onChange={(event) => {
             resetErrors();
+            onDirty?.();
             setName(event.target.value);
           }}
           placeholder="例如 K-2026-0911-A"
